@@ -73,8 +73,8 @@ procedure RemoveOwnAutostart();
 var
   Value: String;
 begin
-  if RegQueryStringValue(HKCU, RunKey, 'WirelessBattery', Value) and (CompareText(Value, InstalledRunValue()) = 0) then
-    RegDeleteValue(HKCU, RunKey, 'WirelessBattery');
+  if RegQueryStringValue(HKCU, RunKey, 'Kontur', Value) and (CompareText(Value, InstalledRunValue()) = 0) then
+    RegDeleteValue(HKCU, RunKey, 'Kontur');
 end;
 
 { True if this account can create the chosen folder (or write to it if it already exists).
@@ -127,6 +127,8 @@ begin
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
+var
+  Code: Integer;
 begin
   if CurStep = ssInstall then
     QuitRunningApp();  { upgrade: close the old version so its files can be replaced }
@@ -134,7 +136,7 @@ begin
   begin
     { Same value the app's own "Start with Windows" menu item writes, so the two stay in sync. }
     if WizardIsTaskSelected('autostart') then
-      RegWriteStringValue(HKCU, RunKey, 'WirelessBattery', InstalledRunValue())
+      Exec(ExpandConstant('{app}\\Kontur.exe'), '--enable-autostart', '', SW_HIDE, ewWaitUntilTerminated, Code)
     else
       RemoveOwnAutostart();
   end;

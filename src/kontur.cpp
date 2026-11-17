@@ -50,7 +50,9 @@ HWND RunningHost() {
     return FindWindowW(kPreviousWindow, nullptr);
 }
 const wchar_t* kRunKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-const wchar_t* kRunValue = L"WirelessBattery";
+constexpr wchar_t kRunValue[] = L"Kontur";
+constexpr wchar_t kLegacyRunValue[] = L"WirelessBattery";
+constexpr wchar_t kStartupApproval[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
 
 const wchar_t* kSettingsKey = L"Software\\WirelessBattery";
 
@@ -203,6 +205,39 @@ void SetAutostart(bool on) {
         RegDeleteValueW(k, kRunValue);
     }
     RegCloseKey(k);
+}
+
+void MigrateAutostart() {
+    wchar_t legacy[1024]{};
+    DWORD bytes = sizeof(legacy);
+    if (RegGetValueW(HKEY_CURRENT_USER, kRunKey, kLegacyRunValue, RRF_RT_REG_SZ, nullptr,
+                     legacy, &bytes) != ERROR_SUCCESS) return;
+    int count = 0;
+    LPWSTR* args = CommandLineToArgvW(legacy, &count);
+    if (!args) return;
+    const std::wstring path = count > 0 ? args[0] : L"";
+    LocalFree(args);
+    const auto name = path.substr(path.find_last_of(L"\\/") + 1);
+    if (_wcsicmp(name.c_str(), L"WirelessBattery.exe") && _wcsicmp(name.c_str(), L"Kontur.exe")) return;
+
+    bytes = 0;
+    const auto existing = RegGetValueW(HKEY_CURRENT_USER, kRunKey, kRunValue, RRF_RT_REG_SZ,
+                                       nullptr, nullptr, &bytes);
+    if (existing == ERROR_FILE_NOT_FOUND) {
+        BYTE approval[64]{};
+        bytes = sizeof(approval);
+        const auto state = RegGetValueW(HKEY_CURRENT_USER, kStartupApproval, kLegacyRunValue,
+                                        RRF_RT_REG_BINARY, nullptr, approval, &bytes);
+        if (state == ERROR_SUCCESS) {
+            if (RegSetKeyValueW(HKEY_CURRENT_USER, kStartupApproval, kRunValue,
+                                REG_BINARY, approval, bytes) != ERROR_SUCCESS) return;
+        } else if (state != ERROR_FILE_NOT_FOUND) return;
+        const auto command = L"\"" + ExePath() + L"\" --background";
+        if (RegSetKeyValueW(HKEY_CURRENT_USER, kRunKey, kRunValue, REG_SZ, command.c_str(),
+                            (DWORD)((command.size() + 1) * sizeof(wchar_t))) != ERROR_SUCCESS) return;
+    } else if (existing != ERROR_SUCCESS) return;
+    if (RegDeleteKeyValueW(HKEY_CURRENT_USER, kRunKey, kLegacyRunValue) == ERROR_SUCCESS)
+        RegDeleteKeyValueW(HKEY_CURRENT_USER, kStartupApproval, kLegacyRunValue);
 }
 
 // ---- icon rendering ---------------------------------------------------------------------------
@@ -911,6 +946,11 @@ int ListToConsole(bool dump) {
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     if (cmdLine && wcsstr(cmdLine, L"--list")) return ListToConsole(false);
     if (cmdLine && wcsstr(cmdLine, L"--dump")) return ListToConsole(true);
+    if (cmdLine && wcscmp(cmdLine, L"--enable-autostart") == 0) {
+        MigrateAutostart();
+        SetAutostart(true);
+        return AutostartEnabled() ? 0 : 1;
+    }
     if (cmdLine && wcsstr(cmdLine, L"--quit")) {  // used by the installer before upgrading/uninstalling
         if (HWND w = RunningHost()) {
             PostMessageW(w, WM_CLOSE, 0, 0);
@@ -969,6 +1009,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     widget::SetBackground(g_widgetBackground);  // remembered by the widget across re-creation
     LoadHidden();
     LoadOrder();
+    MigrateAutostart();
     Reconcile();
     UpdatePlaceholder();  // something to click on until the first poll finishes
     audio::Start(g_hwnd, WM_AUDIO_CHANGED);
