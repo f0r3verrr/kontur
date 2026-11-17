@@ -8,5 +8,5 @@ bool Start(HWND owner, UINT message);
 void Stop();
 bool Running();
 bool CurrentEvent(LPARAM session);
-void Reply(const std::wstring& text);
+void Reply(const std::wstring& text, int volume);
 }

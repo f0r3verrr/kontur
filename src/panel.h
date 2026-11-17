@@ -14,13 +14,14 @@ struct BatteryRow {
 };
 
 enum Action : UINT { SelectOutput, ConfigureOutput, AddOutput, SelectExtra, AudioSettingsChanged,
-                     ToggleVoice, ToggleReply, SaveReply };
+                     ToggleVoice, ToggleReply, SaveReply, ReplyVolume };
 
 bool IsOpen();
 void Show(HWND owner, UINT message);
 void UpdateAudio();
 void UpdateVoice(bool enabled, const std::wstring& status);
 void UpdateReply(bool enabled, const std::wstring& text);
+void UpdateReplyVolume(int volume);
 std::wstring ReplyText();
 void ShowListening(HWND owner);
 void HideListening();

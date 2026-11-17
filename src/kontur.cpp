@@ -587,6 +587,7 @@ void SetVoice(bool enabled) {
 
 bool g_voiceReply;
 std::wstring g_voiceReplyText;
+int g_voiceReplyVolume = 100;
 
 void LoadVoiceReply() {
     g_voiceReply = LoadBoolSetting(L"VoiceReplyEnabled", true);
@@ -597,6 +598,20 @@ void LoadVoiceReply() {
         g_voiceReplyText = text;
     else g_voiceReplyText = L"Команда выполнена";
     panel::UpdateReply(g_voiceReply, g_voiceReplyText);
+    DWORD volume = 100, bytes = sizeof(volume);
+    if (RegGetValueW(HKEY_CURRENT_USER, kSettingsKey, L"VoiceReplyVolume", RRF_RT_REG_DWORD, nullptr,
+                     &volume, &bytes) != ERROR_SUCCESS) volume = 100;
+    g_voiceReplyVolume = static_cast<int>((std::min)(volume, 100UL));
+    panel::UpdateReplyVolume(g_voiceReplyVolume);
+}
+
+void SetVoiceReplyVolume(int volume, bool save) {
+    g_voiceReplyVolume = std::clamp(volume, 0, 100);
+    panel::UpdateReplyVolume(g_voiceReplyVolume);
+    if (save) {
+        const DWORD value = g_voiceReplyVolume;
+        RegSetKeyValueW(HKEY_CURRENT_USER, kSettingsKey, L"VoiceReplyVolume", REG_DWORD, &value, sizeof(value));
+    }
 }
 
 void SaveVoiceReply() {
@@ -912,6 +927,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 panel::UpdateReply(g_voiceReply, g_voiceReplyText);
             }
             if (wp == panel::SaveReply) SaveVoiceReply();
+            if (wp == panel::ReplyVolume) SetVoiceReplyVolume(LOWORD(lp), HIWORD(lp) != 0);
             return 0;
         case WM_VOICE:
             if (!voice::CurrentEvent(lp)) return 0;
@@ -923,7 +939,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 case voice::Headphones:
                     panel::HideListening();
                     if (voice::Running() && SwitchAudio(wp == voice::Speakers ? 0 : 1) && g_voiceReply)
-                        voice::Reply(g_voiceReplyText);
+                        voice::Reply(g_voiceReplyText, g_voiceReplyVolume);
                     break;
                 case voice::ReplyError:
                     AudioToast(L"Не удалось озвучить ответ");

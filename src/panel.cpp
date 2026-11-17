@@ -22,6 +22,8 @@ enum Control : UINT { Speakers = 100, Headphones, Configure, Add, Day, Week, Bat
                       BatteryPage = 200, AudioPage, VoicePage };
 HWND g_panel, g_owner, g_buttons[6], g_list, g_extraList, g_toast, g_settings, g_voiceToggle, g_listening;
 HWND g_replyToggle, g_replyEdit, g_replySave;
+HWND g_volumeSlider;
+int g_replyVolume = 100;
 HFONT g_replyFont;
 constexpr COLORREF kReplyInput = RGB(30, 29, 44);
 UINT g_message;
@@ -546,7 +548,8 @@ LRESULT CALLBACK ListeningProc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(window, msg, wp, lp);
 }
 
-enum SettingControl : UINT { OutputList = 400, OutputName, SaveName, SetSpeakers, SetHeadphones, ToggleExtra, ConnectWindows };
+enum SettingControl : UINT { OutputList = 400, OutputName, SaveName, SetSpeakers, SetHeadphones, ToggleExtra, ConnectWindows,
+                             ReplyLevel };
 HWND g_settingsList, g_settingsName, g_settingsButtons[5];
 HFONT g_settingsFont;
 bool g_adding;
@@ -647,6 +650,7 @@ void SettingsLayout(HWND window) {
     MoveWindow(g_settingsButtons[2], p(174), p(357), p(143), p(38), TRUE);
     MoveWindow(g_settingsButtons[3], r.right - p(200), p(357), p(178), p(38), TRUE);
     MoveWindow(g_settingsButtons[4], p(22), p(410), p(208), p(34), TRUE);
+    MoveWindow(g_volumeSlider, p(22), p(482), w, p(32), TRUE);
     ShowWindow(g_settingsName, SW_SHOW);
     for (int i = 0; i < 3; ++i) ShowWindow(g_settingsButtons[i], SW_SHOW);
 }
@@ -671,6 +675,26 @@ void PaintSettingsItem(const DRAWITEMSTRUCT& item) {
     FocusAccent(item, r, p);
 }
 
+LRESULT DrawVolumeSlider(const NMCUSTOMDRAW& paint) {
+    if (paint.dwDrawStage != CDDS_PREPAINT) return CDRF_DODEFAULT;
+    HWND window = paint.hdr.hwndFrom;
+    Scale p{GetDpiForWindow(window)};
+    RECT client{}, track{}, thumb{};
+    GetClientRect(window, &client);
+    SendMessageW(window, TBM_GETCHANNELRECT, 0, (LPARAM)&track);
+    SendMessageW(window, TBM_GETTHUMBRECT, 0, (LPARAM)&thumb);
+    Fill(paint.hdc, client, kBackground);
+    const int y = client.bottom / 2;
+    const int center = (thumb.left + thumb.right) / 2;
+    Rounded(paint.hdc, {track.left, y - p(2), track.right, y + p(2)}, p(4), kLine);
+    Rounded(paint.hdc, {track.left, y - p(2), center, y + p(2)}, p(4), kAccent);
+    if (GetFocus() == window && !(SendMessageW(window, WM_QUERYUISTATE, 0, 0) & UISF_HIDEFOCUS)) {
+        Rounded(paint.hdc, {center - p(10), y - p(10), center + p(10), y + p(10)}, p(20), kLine);
+    }
+    Rounded(paint.hdc, {center - p(6), y - p(6), center + p(6), y + p(6)}, p(12), kAccent);
+    return CDRF_SKIPDEFAULT;
+}
+
 LRESULT CALLBACK SettingsProc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_CREATE: {
@@ -687,6 +711,16 @@ LRESULT CALLBACK SettingsProc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
             for (UINT i = 0; i < ARRAYSIZE(g_settingsButtons); ++i)
                 g_settingsButtons[i] = CreateWindowW(L"BUTTON", labels[i], WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                     0, 0, 0, 0, window, (HMENU)(UINT_PTR)(SaveName + i), inst, nullptr);
+            if (!g_adding) {
+                INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_BAR_CLASSES};
+                InitCommonControlsEx(&controls);
+                g_volumeSlider = CreateWindowW(TRACKBAR_CLASSW, L"Громкость ответа Контура",
+                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS, 0, 0, 0, 0, window,
+                    (HMENU)(UINT_PTR)ReplyLevel, inst, nullptr);
+                SendMessageW(g_volumeSlider, TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
+                SendMessageW(g_volumeSlider, TBM_SETPAGESIZE, 0, 10);
+                SendMessageW(g_volumeSlider, TBM_SETPOS, TRUE, g_replyVolume);
+            }
             SettingsLayout(window);
             PopulateOutputSettings();
             return 0;
@@ -694,6 +728,20 @@ LRESULT CALLBACK SettingsProc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_SIZE:
             SettingsLayout(window);
             return 0;
+        case WM_HSCROLL:
+            if ((HWND)lp == g_volumeSlider && g_volumeSlider) {
+                const auto volume = SendMessageW(g_volumeSlider, TBM_GETPOS, 0, 0);
+                SendMessageW(g_owner, g_message, panel::ReplyVolume,
+                             MAKELPARAM(volume, LOWORD(wp) != TB_THUMBTRACK));
+                return 0;
+            }
+            break;
+        case WM_NOTIFY: {
+            const auto& info = *reinterpret_cast<NMHDR*>(lp);
+            if (info.idFrom == ReplyLevel && info.code == NM_CUSTOMDRAW)
+                return DrawVolumeSlider(*reinterpret_cast<NMCUSTOMDRAW*>(lp));
+            break;
+        }
         case WM_COMMAND: {
             const auto id = LOWORD(wp);
             if (id == OutputList) {
@@ -753,9 +801,13 @@ LRESULT CALLBACK SettingsProc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
             if (g_optionIds.empty())
                 Text(dc, {p(28), p(64), r.right - p(22), p(108)}, L"Новых доступных выходов нет", kQuiet, small.handle);
             if (!g_adding) Text(dc, {p(22), p(281), r.right - p(22), p(307)}, L"Имя в Контуре", kQuiet, small.handle);
-            if (!g_adding)
+            if (!g_adding) {
                 Text(dc, {p(242), p(410), r.right - p(22), p(444)}, g_settingsNotice, kQuiet, small.handle, DT_RIGHT);
-            else if (!g_settingsNotice.empty()) {
+                Fill(dc, {p(22), p(452), r.right - p(22), p(453)}, kLine);
+                Text(dc, {p(22), p(457), r.right - p(95), p(480)}, L"Громкость ответа Контура", kInk, small.handle);
+                Text(dc, {r.right - p(90), p(457), r.right - p(22), p(480)},
+                     std::to_wstring(g_replyVolume) + L"%", kAccent, small.handle, DT_RIGHT);
+            } else if (!g_settingsNotice.empty()) {
                 Text(dc, {p(22), r.bottom - p(68), r.right - p(22), r.bottom - p(54)},
                      g_settingsNotice, kQuiet, small.handle);
             }
@@ -764,6 +816,7 @@ LRESULT CALLBACK SettingsProc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_DESTROY:
             g_settings = nullptr;
+            g_volumeSlider = nullptr;
             DeleteObject(g_settingsFont);
             g_settingsNotice.clear();
             return 0;
@@ -810,7 +863,7 @@ void ShowOutputSettings(bool adding) {
         Register(inst, cls, SettingsProc, g_brand);
         Scale p{GetDpiForWindow(g_panel)};
         constexpr DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
-        RECT size{0, 0, p(adding ? 560 : 600), p(adding ? 174 : 460)}, owner{};
+        RECT size{0, 0, p(adding ? 560 : 600), p(adding ? 174 : 531)}, owner{};
         AdjustWindowRectExForDpi(&size, style, FALSE, WS_EX_CONTROLPARENT, p.dpi);
         GetWindowRect(g_panel, &owner);
         const int w = size.right - size.left, h = size.bottom - size.top;
@@ -869,6 +922,14 @@ void UpdateReply(bool enabled, const std::wstring& text) {
     SetWindowTextW(g_replyToggle, enabled ? L"Звук включён" : L"Звук выключен");
     InvalidateRect(g_replyToggle, nullptr, FALSE);
     if (changed) SetWindowTextW(g_replyEdit, text.c_str());
+}
+
+void UpdateReplyVolume(int volume) {
+    g_replyVolume = volume;
+    if (!g_volumeSlider) return;
+    if (SendMessageW(g_volumeSlider, TBM_GETPOS, 0, 0) != volume)
+        SendMessageW(g_volumeSlider, TBM_SETPOS, TRUE, volume);
+    InvalidateRect(g_settings, nullptr, FALSE);
 }
 
 std::wstring ReplyText() {

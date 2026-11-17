@@ -36,7 +36,7 @@ Piper 2023.11.14-2, unmodified Windows x64 release binaries and data:
   ONNX Runtime source: https://github.com/microsoft/onnxruntime/commit/c57cf37
   License texts and notices are in voice/piper.
 
-Piper voice ru_RU-dmitri-medium, MIT model repository, CC0 dataset:
-  https://huggingface.co/rhasspy/piper-voices/tree/ae9d8352b73c1b1750748843e753a504b00e05b0/ru/ru_RU/dmitri/medium
-  Model SHA-256 f073356ebc4bd0f80c5af58df2953a5988bd5bdab1eb38635ce960b071fbefcb
+Piper voice ru_RU-denis-medium, MIT model repository, CC0 dataset:
+  https://huggingface.co/rhasspy/piper-voices/tree/e7229f7d33a10e145e109b886d661984201ac3c4/ru/ru_RU/denis/medium
+  Model SHA-256 15fab56e11a097858ee115545d0f697fc2a316c41a291a5362349fb870411b0a
   See voice/piper/MODEL_CARD.

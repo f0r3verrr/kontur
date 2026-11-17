@@ -3,6 +3,7 @@
 
 #include <mmsystem.h>
 #include <sapi.h>
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <deque>
@@ -300,7 +301,7 @@ void PreferRussian(ISpVoice* voice) {
     }
 }
 
-bool SpeakWithWindows(const std::wstring& text) {
+bool SpeakWithWindows(const std::wstring& text, int volume) {
     const HRESULT initialized = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     ISpVoice* speaker = nullptr;
     bool success = false;
@@ -308,6 +309,7 @@ bool SpeakWithWindows(const std::wstring& text) {
         if (SUCCEEDED(CoCreateInstance(__uuidof(SpVoice), nullptr, CLSCTX_INPROC_SERVER,
                                        __uuidof(ISpVoice), (void**)&speaker))) {
             PreferRussian(speaker);
+            speaker->SetVolume((USHORT)volume);
             if (WaitForSingleObject(g_stop, 0) == WAIT_TIMEOUT &&
                 SUCCEEDED(speaker->Speak(text.c_str(), SPF_ASYNC | SPF_IS_NOT_XML, nullptr))) {
                 const auto deadline = GetTickCount64() + 12000;
@@ -326,11 +328,13 @@ bool SpeakWithWindows(const std::wstring& text) {
     return success;
 }
 
+struct ReplyRequest { std::wstring text; int volume; };
+
 DWORD WINAPI Speak(LPVOID payload) {
-    std::unique_ptr<std::wstring> text(static_cast<std::wstring*>(payload));
-    const auto neural = neural_reply::Speak(VoiceDirectory() + L"piper\\", Utf8(*text), g_stop);
+    std::unique_ptr<ReplyRequest> request(static_cast<ReplyRequest*>(payload));
+    const auto neural = neural_reply::Speak(VoiceDirectory() + L"piper\\", Utf8(request->text), request->volume, g_stop);
     const bool success = neural == neural_reply::Result::Played ||
-                         (neural == neural_reply::Result::Unavailable && SpeakWithWindows(*text));
+                         (neural == neural_reply::Result::Unavailable && SpeakWithWindows(request->text, request->volume));
     g_mutedUntil = GetTickCount64() + 500;
     g_speaking = false;
     if (!success && WaitForSingleObject(g_stop, 0) == WAIT_TIMEOUT) Report(voice::ReplyError);
@@ -376,14 +380,14 @@ void Stop() {
 bool Running() { return g_running; }
 bool CurrentEvent(LPARAM session) { return session == g_session; }
 
-void Reply(const std::wstring& text) {
-    if (!g_running || text.empty()) return;
+void Reply(const std::wstring& text, int volume) {
+    if (!g_running || text.empty() || volume <= 0) return;
     if (g_reply) {
         if (WaitForSingleObject(g_reply, 0) != WAIT_OBJECT_0) return;
         CloseHandle(g_reply);
     }
     g_speaking = true;
-    auto* payload = new std::wstring(text);
+    auto* payload = new ReplyRequest{text, (std::min)(volume, 100)};
     g_reply = CreateThread(nullptr, 0, Speak, payload, 0, nullptr);
     if (!g_reply) {
         delete payload;

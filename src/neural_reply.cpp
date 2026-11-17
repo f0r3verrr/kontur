@@ -2,11 +2,14 @@
 #include <mmsystem.h>
 #include <algorithm>
 #include <array>
+#include <cstdint>
+#include <cstring>
 #include <memory>
 
 namespace {
 constexpr DWORD kRate = 22050;
 constexpr size_t kMaxPcm = kRate * 2 * 20;
+constexpr wchar_t kModel[] = L"ru_RU-denis-medium.onnx";
 std::string g_lastText;
 std::vector<char> g_lastPcm;
 
@@ -52,6 +55,15 @@ bool Play(std::vector<char>& pcm, HANDLE stop) {
     waveOutClose(output);
     return played;
 }
+
+void ApplyGain(std::vector<char>& pcm, int volume) {
+    for (size_t offset = 0; offset + sizeof(int16_t) <= pcm.size(); offset += sizeof(int16_t)) {
+        int16_t sample;
+        std::memcpy(&sample, pcm.data() + offset, sizeof(sample));
+        sample = static_cast<int16_t>(sample * volume / 100);
+        std::memcpy(pcm.data() + offset, &sample, sizeof(sample));
+    }
+}
 }
 
 namespace neural_reply {
@@ -64,7 +76,7 @@ bool Synthesize(const std::wstring& folder, const std::string& text, HANDLE stop
     Handle errors(CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_WRITE, &security, OPEN_EXISTING, 0, nullptr));
     if (errors.get() == INVALID_HANDLE_VALUE) return false;
     const auto exe = folder + L"piper.exe";
-    auto command = L"\"" + exe + L"\" --model ru_RU-dmitri-medium.onnx --output_raw";
+    auto command = L"\"" + exe + L"\" --model " + kModel + L" --output_raw";
     STARTUPINFOEXW startup{};
     startup.StartupInfo.cb = sizeof(startup);
     startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
@@ -118,9 +130,11 @@ bool Synthesize(const std::wstring& folder, const std::string& text, HANDLE stop
     return false;
 }
 
-Result Speak(const std::wstring& folder, const std::string& text, HANDLE stop) {
+Result Speak(const std::wstring& folder, const std::string& text, int volume, HANDLE stop) {
+    volume = std::clamp(volume, 0, 100);
+    if (volume == 0) return Result::Played;
     if (GetFileAttributesW((folder + L"piper.exe").c_str()) == INVALID_FILE_ATTRIBUTES ||
-        GetFileAttributesW((folder + L"ru_RU-dmitri-medium.onnx").c_str()) == INVALID_FILE_ATTRIBUTES)
+        GetFileAttributesW((folder + kModel).c_str()) == INVALID_FILE_ATTRIBUTES)
         return Result::Unavailable;
     if (g_lastText != text || g_lastPcm.empty()) {
         std::vector<char> pcm;
@@ -128,7 +142,10 @@ Result Speak(const std::wstring& folder, const std::string& text, HANDLE stop) {
         g_lastText = text;
         g_lastPcm = std::move(pcm);
     }
-    return Play(g_lastPcm, stop) ? Result::Played : Result::Failed;
+    if (volume == 100) return Play(g_lastPcm, stop) ? Result::Played : Result::Failed;
+    auto attenuated = g_lastPcm;
+    ApplyGain(attenuated, volume);
+    return Play(attenuated, stop) ? Result::Played : Result::Failed;
 }
 
 void ClearCache() {
