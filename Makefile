@@ -1,4 +1,4 @@
-# Builds WirelessBattery.exe with MinGW-w64 (MSYS2 MINGW64/UCRT64 shell, or any mingw g++ on PATH).
+# Builds Kontur.exe with MinGW-w64 (MSYS2 MINGW64/UCRT64 shell, or any mingw g++ on PATH).
 CXX      ?= g++
 WINDRES  ?= windres
 CXXFLAGS ?= -std=c++17 -Os -Wall -Wno-missing-field-initializers -ffunction-sections -fdata-sections \
@@ -9,7 +9,7 @@ LIBS     := -lhid -lsetupapi -lcfgmgr32 -lole32 -loleaut32 -lcomctl32 -lgdi32 -l
 SRC := $(wildcard src/*.cpp) $(wildcard src/drivers/*.cpp)
 OBJ := $(patsubst src/%.cpp,build/%.o,$(SRC)) build/app_res.o
 
-WirelessBattery.exe: $(OBJ)
+Kontur.exe: $(OBJ)
 	$(CXX) $(LDFLAGS) $^ -o $@ $(LIBS)
 
 build/%.o: src/%.cpp $(wildcard src/*.h src/drivers/*.h)
@@ -21,7 +21,7 @@ build/app_res.o: res/app.rc res/app.manifest res/app.ico
 	$(WINDRES) -i $< -o $@ --include-dir res
 
 clean:
-	rm -rf build WirelessBattery.exe
+	rm -rf build Kontur.exe
 
 test:
 	@mkdir -p build

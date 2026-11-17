@@ -71,6 +71,7 @@ public:
 };
 
 constexpr wchar_t kSettings[] = L"Software\\WirelessBattery";
+constexpr wchar_t kNames[] = L"Software\\WirelessBattery\\AudioNames";
 constexpr const wchar_t* kSlots[]{L"AudioSpeakers", L"AudioHeadphones"};
 ComPtr<IMMDeviceEnumerator> g_enumerator;
 ComPtr<Notifications> g_notifications;
@@ -186,7 +187,13 @@ void Refresh() {
         if (SUCCEEDED(properties->GetValue(PKEY_AudioEndpoint_FormFactor, &value)) && value.vt == VT_UI4)
             endpoint.form = value.ulVal;
         PropVariantClear(&value);
-        if (!endpoint.id.empty() && !endpoint.name.empty()) g_endpoints.push_back(std::move(endpoint));
+        if (!endpoint.id.empty() && !endpoint.name.empty()) {
+            wchar_t alias[128]{};
+            DWORD bytes = sizeof(alias);
+            if (RegGetValueW(HKEY_CURRENT_USER, kNames, endpoint.id.c_str(), RRF_RT_REG_SZ,
+                             nullptr, alias, &bytes) == ERROR_SUCCESS) endpoint.alias = alias;
+            g_endpoints.push_back(std::move(endpoint));
+        }
     }
     DetectPair();
 }
@@ -210,6 +217,15 @@ bool Assign(int slot, const std::wstring& id) {
 }
 
 const std::vector<std::wstring>& ExtraOutputs() { return g_extra; }
+
+bool Rename(const std::wstring& id, const std::wstring& name) {
+    if (id.empty() || name.size() >= 128) return false;
+    if (RegSetKeyValueW(HKEY_CURRENT_USER, kNames, id.c_str(), REG_SZ, name.c_str(),
+                        (DWORD)((name.size() + 1) * sizeof(wchar_t))) != ERROR_SUCCESS) return false;
+    for (auto& endpoint : g_endpoints)
+        if (endpoint.id == id) endpoint.alias = name;
+    return true;
+}
 
 bool SaveExtra(const std::wstring& id, bool include) {
     auto next = g_extra;

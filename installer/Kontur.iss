@@ -1,7 +1,7 @@
-; Inno Setup script for Wireless Battery (https://jrsoftware.org/isinfo.php).
+; Inno Setup script for Kontur (https://jrsoftware.org/isinfo.php).
 ; Per-user install by default: no administrator rights needed, installs to %LOCALAPPDATA%\Programs.
 ; Setup also offers "Install for all users" (Program Files, needs administrator rights).
-; Build with installer\build-installer.ps1 (or: ISCC /DAppVersion=1.2.3 installer\WirelessBattery.iss).
+; Build with installer\build-installer.ps1 (or: ISCC /DAppVersion=1.2.3 installer\Kontur.iss).
 
 #ifndef AppVersion
   #define AppVersion "1.0.0"
@@ -9,12 +9,12 @@
 #define Root ".."
 
 [Setup]
-AppId={{7E0B5C2A-3F4D-4C8E-9B61-2D5A8F1C4E93}
-AppName=Wireless Battery
+AppId={{1FA29DBA-16F7-4AB4-98EB-8452B9F452BD}
+AppName=Kontur
 AppVersion={#AppVersion}
-AppVerName=Wireless Battery {#AppVersion}
-AppPublisher=Wireless Battery contributors
-DefaultDirName={autopf}\Wireless Battery
+AppVerName=Kontur {#AppVersion}
+AppPublisher=Kontur contributors
+DefaultDirName={autopf}\Kontur
 DisableProgramGroupPage=yes
 DisableDirPage=auto
 PrivilegesRequired=lowest
@@ -23,33 +23,32 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
 OutputDir={#Root}\dist
-OutputBaseFilename=WirelessBattery-Setup-{#AppVersion}
+OutputBaseFilename=Kontur-Setup-{#AppVersion}
 SetupIconFile={#Root}\res\app.ico
-UninstallDisplayIcon={app}\WirelessBattery.exe
-UninstallDisplayName=Wireless Battery
+UninstallDisplayIcon={app}\Kontur.exe
+UninstallDisplayName=Kontur
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 CloseApplications=no
 
 [Tasks]
-Name: "autostart"; Description: "Start Wireless Battery when I sign in to Windows"
+Name: "autostart"; Description: "Start Kontur when I sign in to Windows"
 
 [Files]
-Source: "{#Root}\WirelessBattery.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Root}\Kontur.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Root}\third_party\headsetcontrol\headsetcontrol.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Root}\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 Source: "{#Root}\installer\THIRD_PARTY_NOTICES.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\Wireless Battery"; Filename: "{app}\WirelessBattery.exe"
+Name: "{autoprograms}\Kontur"; Filename: "{app}\Kontur.exe"
 
 [Run]
-Filename: "{app}\WirelessBattery.exe"; Description: "Start Wireless Battery now"; Flags: nowait postinstall skipifsilent
-Filename: "https://ko-fi.com/krisgfx"; Description: "Enjoying Wireless Battery? Support it on Ko-fi"; Flags: shellexec postinstall unchecked skipifsilent nowait runasoriginaluser
+Filename: "{app}\Kontur.exe"; Description: "Start Kontur now"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
-Filename: "{app}\WirelessBattery.exe"; Parameters: "--quit"; Flags: runhidden waituntilterminated; RunOnceId: "QuitApp"
+Filename: "{app}\Kontur.exe"; Parameters: "--quit"; Flags: runhidden waituntilterminated; RunOnceId: "QuitApp"
 
 [Code]
 const
@@ -59,13 +58,13 @@ procedure QuitRunningApp();
 var
   Code: Integer;
 begin
-  if FileExists(ExpandConstant('{app}\WirelessBattery.exe')) then
-    Exec(ExpandConstant('{app}\WirelessBattery.exe'), '--quit', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  if FileExists(ExpandConstant('{app}\Kontur.exe')) then
+    Exec(ExpandConstant('{app}\Kontur.exe'), '--quit', '', SW_HIDE, ewWaitUntilTerminated, Code);
 end;
 
 function InstalledRunValue(): String;
 begin
-  Result := '"' + ExpandConstant('{app}\WirelessBattery.exe') + '"';
+  Result := '"' + ExpandConstant('{app}\Kontur.exe') + '" --background';
 end;
 
 { Removes the startup entry only if it points at this installed copy, so a portable copy's
@@ -146,6 +145,5 @@ begin
   if CurUninstallStep = usPostUninstall then
   begin
     RemoveOwnAutostart();
-    RegDeleteKeyIncludingSubkeys(HKCU, 'Software\WirelessBattery');
   end;
 end;

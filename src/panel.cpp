@@ -2,6 +2,8 @@
 #include "appearance.h"
 #include "audio.h"
 #include "history.h"
+#include <shellapi.h>
+#include <commctrl.h>
 
 #include <algorithm>
 #include <utility>
@@ -14,13 +16,17 @@ constexpr wchar_t kToast[] = L"KonturToast";
 constexpr wchar_t kSpeakers[] = L"Колонки";
 constexpr wchar_t kHeadphones[] = L"Наушники";
 constexpr const wchar_t* kLabels[]{kSpeakers, kHeadphones};
-enum Control : UINT { Speakers = 100, Headphones, Configure, BatteryPage, AudioPage, Add, Extras, Day, Week, Batteries };
-HWND g_panel, g_owner, g_buttons[9], g_list, g_toast;
+enum Control : UINT { Speakers = 100, Headphones, Configure, Add, Day, Week, Batteries, Extras, BatteryPage = 200, AudioPage };
+HWND g_panel, g_owner, g_buttons[6], g_list, g_extraList, g_toast, g_settings;
 UINT g_message;
-bool g_audioPage;
+size_t g_module;
+std::vector<HWND> g_navigation;
+bool IsAudioPage() { return g_module == 1; }
+bool IsBatteryPage() { return g_module == 0; }
 bool g_oneDay = true;
 HICON g_brand;
 std::vector<panel::BatteryRow> g_rows;
+std::vector<std::wstring> g_extraIds;
 
 struct Font {
     HFONT handle;
@@ -58,73 +64,117 @@ struct Scale {
 };
 
 int ContentWidth(const RECT& r, Scale p) {
-    return (std::min)(int(r.right) - p(248), p(980));
+    return (std::max)(0, (std::min)(int(r.right) - p(274), p(1240)));
 }
+int ContentLeft(const RECT& r, Scale p) { return p(214) + (r.right - p(214) - ContentWidth(r, p)) / 2; }
+int SectionTop(const RECT& r, Scale p) { return p(24) + (std::max)(0L, (r.bottom - p(650)) / 5); }
+
+bool KeyboardFocus(const DRAWITEMSTRUCT& item) {
+    return (item.itemState & ODS_FOCUS) && !(item.itemState & ODS_NOFOCUSRECT) &&
+           !(SendMessageW(item.hwndItem, WM_QUERYUISTATE, 0, 0) & UISF_HIDEFOCUS);
+}
+
+void FocusAccent(const DRAWITEMSTRUCT& item, RECT rect, Scale p) {
+    if (KeyboardFocus(item))
+        Rounded(item.hDC, {rect.left + p(9), rect.bottom - p(5), rect.right - p(9), rect.bottom - p(3)}, p(2), kAccent);
+}
+
+void LayoutNavigation(Scale p);
 
 void Layout(HWND window) {
     Scale p{GetDpiForWindow(window)};
     RECT r{};
     GetClientRect(window, &r);
-    const int left = p(218);
+    const int left = ContentLeft(r, p), top = SectionTop(r, p);
     const int content = ContentWidth(r, p);
     const int column = (content - p(12)) / 2;
-    MoveWindow(g_buttons[2], left + content - p(172), p(32), p(172), p(38), TRUE);
-    MoveWindow(g_buttons[0], left, p(225), column, p(82), TRUE);
-    MoveWindow(g_buttons[1], left + column + p(12), p(225), content - column - p(12), p(82), TRUE);
-    MoveWindow(g_buttons[3], p(14), p(102), p(161), p(45), TRUE);
-    MoveWindow(g_buttons[4], p(14), p(151), p(161), p(45), TRUE);
-    MoveWindow(g_buttons[5], left, p(331), p(203), p(39), TRUE);
-    MoveWindow(g_buttons[6], left + p(215), p(331), p(190), p(39), TRUE);
-    MoveWindow(g_buttons[7], left + content - p(159), p(266), p(75), p(34), TRUE);
-    MoveWindow(g_buttons[8], left + content - p(79), p(266), p(79), p(34), TRUE);
-    for (int i = 0; i < 3; ++i) ShowWindow(g_buttons[i], g_audioPage ? SW_SHOW : SW_HIDE);
-    ShowWindow(g_buttons[5], g_audioPage ? SW_SHOW : SW_HIDE);
-    ShowWindow(g_buttons[6], g_audioPage && !audio::ExtraOutputs().empty() ? SW_SHOW : SW_HIDE);
-    for (int i = 7; i <= 8; ++i) ShowWindow(g_buttons[i], !g_audioPage && !g_rows.empty() ? SW_SHOW : SW_HIDE);
+    MoveWindow(g_buttons[2], left + content - p(172), top + p(8), p(172), p(38), TRUE);
+    MoveWindow(g_buttons[0], left, top + p(200), column, p(81), TRUE);
+    const int split = left + column + p(12), rightWidth = content - column - p(12);
+    MoveWindow(g_buttons[1], split, top + p(200), rightWidth, p(81), TRUE);
+    LayoutNavigation(p);
+    MoveWindow(g_buttons[3], left, top + p(301), (std::min)(column, p(203)), p(39), TRUE);
+    MoveWindow(g_buttons[4], left + content - p(159), top + p(231), p(75), p(34), TRUE);
+    MoveWindow(g_buttons[5], left + content - p(79), top + p(231), p(79), p(34), TRUE);
+    SendMessageW(g_extraList, LB_SETITEMHEIGHT, 0, p(45));
+    const int extraHeight = (std::max)(p(45), int(r.bottom) - top - p(318));
+    MoveWindow(g_extraList, split, top + p(289), rightWidth,
+               (std::min)(extraHeight, (int)g_extraIds.size() * p(45)), TRUE);
+    for (int i = 0; i < 3; ++i) ShowWindow(g_buttons[i], IsAudioPage() ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_buttons[3], IsAudioPage() ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_extraList, IsAudioPage() && !g_extraIds.empty() ? SW_SHOW : SW_HIDE);
+    for (int i = 4; i <= 5; ++i) ShowWindow(g_buttons[i], IsBatteryPage() && !g_rows.empty() ? SW_SHOW : SW_HIDE);
     SendMessageW(g_list, LB_SETITEMHEIGHT, 0, p(50));
-    MoveWindow(g_list, left, p(96), content, p(150), TRUE);
-    ShowWindow(g_list, !g_audioPage && !g_rows.empty() ? SW_SHOW : SW_HIDE);
+    MoveWindow(g_list, left, top + p(66), content, p(150), TRUE);
+    ShowWindow(g_list, IsBatteryPage() && !g_rows.empty() ? SW_SHOW : SW_HIDE);
 }
 
-void PaintPanel(HWND window, HDC dc) {
-    Scale p{GetDpiForWindow(window)};
-    RECT r{};
-    GetClientRect(window, &r);
-    const long left = p(218), right = left + ContentWidth(r, p);
-    Fill(dc, r, kBackground);
-    Fill(dc, {0, 0, p(189), r.bottom}, kSidebar);
-    Fill(dc, {p(188), 0, p(189), r.bottom}, kLine);
-    if (g_brand) DrawIconEx(dc, p(22), p(32), g_brand, p(31), p(31), 0, nullptr, DI_NORMAL);
-    Font brand(p(21), FW_SEMIBOLD, L"Inter");
-    Font title(p(31), FW_SEMIBOLD, L"Inter");
+struct ContentView {
+    Scale p;
+    long left, right, top, bottom;
+};
+
+void PaintAudioView(HWND, HDC dc, const ContentView& view) {
+    const auto [p, left, right, top, bottom] = view;
     Font main(p(19), FW_SEMIBOLD, L"Inter");
     Font small(p(13), FW_NORMAL, L"Inter");
-    Text(dc, {p(64), p(26), p(175), p(69)}, L"Контур", kInk, brand.handle);
-    Text(dc, {left, p(23), right - (g_audioPage ? p(185) : 0), p(79)},
-         g_audioPage ? L"Переключение" : L"Зарядка", kInk, title.handle);
+    const auto* output = audio::Find(audio::Current());
+    Rounded(dc, {left, top + p(66), right, top + p(175)}, p(16), kSurface);
+    Text(dc, {left + p(22), top + p(83), right - p(20), top + p(110)}, L"Активный аудиовыход", kQuiet, small.handle);
+    const RECT dot{left + p(22), top + p(127), left + p(30), top + p(135)};
+    Rounded(dc, dot, p(8), output ? kAccent : kQuiet);
+    Text(dc, {left + p(42), top + p(111), right - p(20), top + p(151)},
+         output ? output->Label() : L"Нет активного выхода", kInk, main.handle);
+}
 
-    if (g_audioPage) {
-        const auto* output = audio::Find(audio::Current());
-        Rounded(dc, {left, p(96), right, p(197)}, p(14), kSurface);
-        Text(dc, {left + p(20), p(113), right - p(20), p(139)}, L"Активный аудиовыход", kQuiet, small.handle);
-        const RECT dot{left + p(20), p(156), left + p(28), p(164)};
-        Rounded(dc, dot, p(8), output ? kAccent : kQuiet);
-        Text(dc, {left + p(40), p(141), right - p(20), p(179)},
-             output ? output->name : L"Нет активного выхода", kInk, main.handle);
-        Text(dc, {left, p(387), right, p(410)},
-             L"Значок рядом с часами переключает доступные выходы по кругу.", kQuiet, small.handle);
-        return;
-    }
-
+void PaintBatteryView(HWND window, HDC dc, const ContentView& view) {
+    const auto [p, left, right, top, bottom] = view;
+    Font main(p(19), FW_SEMIBOLD, L"Inter");
+    Font small(p(13), FW_NORMAL, L"Inter");
     if (g_rows.empty()) {
         Text(dc, {left, p(96), right, p(146)}, L"Ожидаем данные от устройств", kQuiet, small.handle);
         return;
     }
     const auto index = (int)SendMessageW(g_list, LB_GETCURSEL, 0, 0);
     if (index < 0 || index >= (int)g_rows.size()) return;
-    Text(dc, {left, p(265), right - p(170), p(301)}, L"История заряда", kInk, main.handle);
-    history::Paint(window, dc, {left, p(312), right, (std::min)(r.bottom - p(26), (long)p(596))},
+    Text(dc, {left, top + p(229), right - p(170), top + p(267)}, L"История заряда", kInk, main.handle);
+    history::Paint(window, dc, {left, top + p(280), right, bottom - p(30)},
                    g_rows[index].device, g_oneDay);
+}
+
+struct ModuleView {
+    UINT command;
+    const wchar_t* title;
+    const wchar_t* glyph;
+    void (*paint)(HWND, HDC, const ContentView&);
+};
+constexpr ModuleView kModules[]{
+    {BatteryPage, L"Зарядка", L"\uE83F", PaintBatteryView},
+    {AudioPage, L"Переключение", L"\uE767", PaintAudioView},
+};
+
+void LayoutNavigation(Scale p) {
+    for (size_t i = 0; i < g_navigation.size(); ++i)
+        MoveWindow(g_navigation[i], p(14), p(102 + (int)i * 49), p(186), p(45), TRUE);
+}
+
+void PaintPanel(HWND window, HDC dc) {
+    Scale p{GetDpiForWindow(window)};
+    RECT r{};
+    GetClientRect(window, &r);
+    const long left = ContentLeft(r, p), right = left + ContentWidth(r, p), top = SectionTop(r, p);
+    Fill(dc, r, kBackground);
+    Fill(dc, {0, 0, p(214), r.bottom}, kSidebar);
+    Fill(dc, {p(213), 0, p(214), r.bottom}, kLine);
+    if (g_brand) DrawIconEx(dc, p(22), p(32), g_brand, p(31), p(31), 0, nullptr, DI_NORMAL);
+    Font brand(p(21), FW_SEMIBOLD, L"Inter");
+    Font title(p(31), FW_SEMIBOLD, L"Inter");
+    Text(dc, {p(64), p(26), p(175), p(69)}, L"Контур", kInk, brand.handle);
+    const auto& module = kModules[g_module];
+    Text(dc, {left, top, right - (IsAudioPage() ? p(182) : 0), top + p(55)},
+         module.title, kInk, title.handle);
+
+    module.paint(window, dc, {p, left, right, top, r.bottom});
 }
 
 void DrawButton(const DRAWITEMSTRUCT& item) {
@@ -132,18 +182,21 @@ void DrawButton(const DRAWITEMSTRUCT& item) {
     RECT r = item.rcItem;
     Font label(p(15), FW_SEMIBOLD, L"Inter");
     Font sub(p(12), FW_NORMAL, L"Inter");
-    if (item.CtlID == BatteryPage || item.CtlID == AudioPage) {
-        const bool sound = item.CtlID == AudioPage;
-        const bool selected = g_audioPage == sound;
+    const auto navigation = std::find_if(std::begin(kModules), std::end(kModules), [&](const ModuleView& module) {
+        return module.command == item.CtlID;
+    });
+    if (navigation != std::end(kModules)) {
+        const auto& module = *navigation;
+        const bool selected = module.command == kModules[g_module].command;
         Fill(item.hDC, r, kSidebar);
         if (selected || (item.itemState & ODS_SELECTED)) Rounded(item.hDC, r, p(13), kSurface);
         if (selected) Rounded(item.hDC, {r.left, r.top + p(9), r.left + p(3), r.bottom - p(9)}, p(3), kAccent);
         Font glyph(p(17), FW_NORMAL, L"Segoe MDL2 Assets");
         Text(item.hDC, {r.left + p(13), r.top, r.left + p(36), r.bottom},
-             sound ? L"\uE767" : L"\uE83F", selected ? kAccent : kQuiet, glyph.handle, DT_CENTER);
+             module.glyph, selected ? kAccent : kQuiet, glyph.handle, DT_CENTER);
         Text(item.hDC, {r.left + p(44), r.top, r.right - p(7), r.bottom},
-             sound ? L"Переключение" : L"Зарядка", selected ? kInk : kQuiet, label.handle);
-        if (item.itemState & ODS_FOCUS) { InflateRect(&r, -p(3), -p(3)); DrawFocusRect(item.hDC, &r); }
+             module.title, selected ? kInk : kQuiet, label.handle);
+        FocusAccent(item, r, p);
         return;
     }
     const int slot = item.CtlID == Speakers ? 0 : 1;
@@ -155,24 +208,22 @@ void DrawButton(const DRAWITEMSTRUCT& item) {
     Fill(item.hDC, r, kBackground);
     Rounded(item.hDC, r, p(13), selected || item.CtlID == Add ? kAccent : kLine);
     InflateRect(&r, -p(1), -p(1));
+    const bool disabled = (item.itemState & ODS_DISABLED) != 0;
     Rounded(item.hDC, r, p(12), item.CtlID == Add ? kAccent : item.itemState & ODS_SELECTED ? kLine : kSurface);
     if (!output) {
         wchar_t caption[96]{};
         GetWindowTextW(item.hwndItem, caption, ARRAYSIZE(caption));
-        Text(item.hDC, r, caption, item.CtlID == Add ? kBackground : selected ? kAccent : kInk,
+        Text(item.hDC, r, caption, disabled ? kQuiet : item.CtlID == Add ? kBackground : selected ? kAccent : kInk,
              item.CtlID == Day || item.CtlID == Week ? sub.handle : label.handle, DT_CENTER);
     } else {
         RECT title{r.left + p(16), r.top + p(13), r.right - p(14), r.top + p(40)};
         RECT detail{title.left, r.top + p(39), title.right, r.bottom - p(10)};
         Text(item.hDC, title, kLabels[slot], unavailable ? kQuiet : kInk, label.handle);
         const auto caption = !endpoint ? L"Выбрать устройство" :
-                             unavailable ? L"Устройство недоступно" : endpoint->name;
+                             unavailable ? endpoint->Label() + L" · недоступно" : endpoint->Label();
         Text(item.hDC, detail, caption, selected ? kAccent : kQuiet, sub.handle);
     }
-    if (item.itemState & ODS_FOCUS) {
-        InflateRect(&r, -p(3), -p(3));
-        DrawFocusRect(item.hDC, &r);
-    }
+    FocusAccent(item, r, p);
 }
 
 void DrawBattery(const DRAWITEMSTRUCT& item) {
@@ -198,26 +249,48 @@ void DrawBattery(const DRAWITEMSTRUCT& item) {
         Rounded(item.hDC, bar, p(5), row.low ? kAmber : kAccent);
     }
     Text(item.hDC, {r.right - p(62), r.top, r.right - p(10), r.bottom}, row.value, color, number.handle, DT_RIGHT);
-    if (item.itemState & ODS_FOCUS) {
-        RECT focus = r;
-        InflateRect(&focus, -p(1), -p(1));
-        DrawFocusRect(item.hDC, &focus);
-    }
+    FocusAccent(item, r, p);
+}
+
+HWND MakeList(HWND parent, UINT id, const wchar_t* label, HINSTANCE inst) {
+    return CreateWindowW(L"LISTBOX", label, WS_CHILD | WS_TABSTOP | WS_VSCROLL |
+                         LBS_NOINTEGRALHEIGHT | LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
+                         0, 0, 0, 0, parent, (HMENU)(UINT_PTR)id, inst, nullptr);
+}
+
+void DrawExtra(const DRAWITEMSTRUCT& item) {
+    if (item.itemID >= g_extraIds.size()) return;
+    const auto& id = g_extraIds[item.itemID];
+    const auto* device = audio::Find(id);
+    const bool active = id == audio::Current();
+    const bool available = device && device->available;
+    Scale p{GetDpiForWindow(item.hwndItem)};
+    const auto& r = item.rcItem;
+    Fill(item.hDC, r, kBackground);
+    Rounded(item.hDC, {r.left, r.top + p(2), r.right, r.bottom - p(3)}, p(11), active ? kAccent : kLine);
+    Rounded(item.hDC, {r.left + 1, r.top + p(2) + 1, r.right - 1, r.bottom - p(3) - 1}, p(10), kSurface);
+    Font label(p(14), FW_SEMIBOLD, L"Inter");
+    const std::wstring name = device ? device->Label() : L"Устройство не найдено";
+    Text(item.hDC, {r.left + p(14), r.top, r.right - p(12), r.bottom},
+         device && !available ? name + L" · недоступно" : name, active ? kAccent : available ? kInk : kQuiet, label.handle);
+    FocusAccent(item, r, p);
 }
 
 LRESULT CALLBACK PanelProc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_CREATE: {
             HINSTANCE inst = (HINSTANCE)GetWindowLongPtrW(window, GWLP_HINSTANCE);
-            const wchar_t* labels[]{kSpeakers, kHeadphones, L"Настроить выходы", L"Зарядка", L"Переключение",
-                                    L"+ Добавить устройство", L"Другие выходы ▾", L"24 часа", L"7 дней"};
+            for (const auto& module : kModules) {
+                g_navigation.push_back(CreateWindowW(L"BUTTON", module.title,
+                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 0, 0, window,
+                    (HMENU)(UINT_PTR)module.command, inst, nullptr));
+            }
+            const wchar_t* labels[]{kSpeakers, kHeadphones, L"Настроить выходы", L"+ Добавить устройство", L"24 часа", L"7 дней"};
             for (UINT i = 0; i < ARRAYSIZE(g_buttons); ++i)
-                g_buttons[i] = CreateWindowW(L"BUTTON", labels[i], WS_CHILD | WS_TABSTOP | BS_OWNERDRAW |
-                                             (i == 3 || i == 4 ? WS_VISIBLE : 0),
+                g_buttons[i] = CreateWindowW(L"BUTTON", labels[i], WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
                                              0, 0, 0, 0, window, (HMENU)(UINT_PTR)(Speakers + i), inst, nullptr);
-            g_list = CreateWindowW(L"LISTBOX", L"Заряд устройств", WS_CHILD | WS_TABSTOP | WS_VSCROLL |
-                                   LBS_NOINTEGRALHEIGHT | LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
-                                   0, 0, 0, 0, window, (HMENU)(UINT_PTR)Batteries, inst, nullptr);
+            g_list = MakeList(window, Batteries, L"Заряд устройств", inst);
+            g_extraList = MakeList(window, Extras, L"Дополнительные аудиовыходы", inst);
             Layout(window);
             return 0;
         }
@@ -240,21 +313,26 @@ LRESULT CALLBACK PanelProc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_COMMAND: {
             const auto id = LOWORD(wp);
             if (id == Configure) PostMessageW(g_owner, g_message, panel::ConfigureOutput, 0);
-            if (id == Add || id == Extras) PostMessageW(g_owner, g_message,
-                                                        id == Add ? panel::AddOutput : panel::ShowExtras, 0);
-            if (id == Speakers || id == Headphones) PostMessageW(g_owner, g_message, panel::SelectOutput, id - Speakers);
-            if (id == BatteryPage || id == AudioPage) {
-                g_audioPage = id == AudioPage;
-                Layout(window);
-                InvalidateRect(g_buttons[3], nullptr, FALSE);
-                InvalidateRect(g_buttons[4], nullptr, FALSE);
+            if (id == Add) PostMessageW(g_owner, g_message, panel::AddOutput, 0);
+            if (id == Extras && HIWORD(wp) == LBN_SELCHANGE) {
+                const auto index = SendMessageW(g_extraList, LB_GETCURSEL, 0, 0);
+                if (index != LB_ERR) SendMessageW(g_owner, g_message, panel::SelectExtra, index);
             }
-            if (id == BatteryPage || id == AudioPage || (id == Batteries && HIWORD(wp) == LBN_SELCHANGE))
-                InvalidateRect(window, nullptr, FALSE);
+            if (id == Speakers || id == Headphones) PostMessageW(g_owner, g_message, panel::SelectOutput, id - Speakers);
+            for (size_t i = 0; i < ARRAYSIZE(kModules); ++i) {
+                if (id == kModules[i].command) {
+                    g_module = i;
+                    Layout(window);
+                    for (HWND button : g_navigation) InvalidateRect(button, nullptr, FALSE);
+                    InvalidateRect(window, nullptr, FALSE);
+                    return 0;
+                }
+            }
+            if (id == Batteries && HIWORD(wp) == LBN_SELCHANGE) InvalidateRect(window, nullptr, FALSE);
             if (id == Day || id == Week) {
                 g_oneDay = id == Day;
-                InvalidateRect(g_buttons[7], nullptr, FALSE);
-                InvalidateRect(g_buttons[8], nullptr, FALSE);
+                InvalidateRect(g_buttons[4], nullptr, FALSE);
+                InvalidateRect(g_buttons[5], nullptr, FALSE);
                 InvalidateRect(window, nullptr, FALSE);
             }
             return 0;
@@ -262,7 +340,8 @@ LRESULT CALLBACK PanelProc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_DRAWITEM: {
             const auto& item = *reinterpret_cast<DRAWITEMSTRUCT*>(lp);
             if (item.CtlType == ODT_BUTTON) DrawButton(item);
-            if (item.CtlType == ODT_LISTBOX) DrawBattery(item);
+            if (item.CtlID == Batteries) DrawBattery(item);
+            if (item.CtlID == Extras) DrawExtra(item);
             return TRUE;
         }
         case WM_CTLCOLORLISTBOX: {
@@ -281,6 +360,9 @@ LRESULT CALLBACK PanelProc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_DESTROY:
             g_panel = nullptr;
             g_list = nullptr;
+            g_extraList = nullptr;
+            g_extraIds.clear();
+            g_navigation.clear();
             g_rows.clear();
             return 0;
     }
@@ -324,6 +406,198 @@ void Register(HINSTANCE inst, const wchar_t* name, WNDPROC procedure, HICON icon
     RegisterClassW(&cls);
 }
 
+enum SettingControl : UINT { OutputList = 400, OutputName, SaveName, SetSpeakers, SetHeadphones, ToggleExtra, ConnectWindows };
+HWND g_settingsList, g_settingsName, g_settingsButtons[5];
+HFONT g_settingsFont;
+bool g_adding;
+std::vector<std::wstring> g_optionIds;
+std::wstring g_settingsNotice;
+
+bool IsExtra(const std::wstring& id) {
+    const auto& extra = audio::ExtraOutputs();
+    return std::find(extra.begin(), extra.end(), id) != extra.end();
+}
+
+std::wstring SelectedOutput() {
+    const auto index = SendMessageW(g_settingsList, LB_GETCURSEL, 0, 0);
+    return index >= 0 && (size_t)index < g_optionIds.size() ? g_optionIds[index] : L"";
+}
+
+void ShowSelectedOutput() {
+    const auto id = SelectedOutput();
+    const auto* endpoint = audio::Find(id);
+    const bool primary = !id.empty() && (id == audio::Configured(0) || id == audio::Configured(1));
+    SetWindowTextW(g_settingsName, endpoint ? endpoint->alias.c_str() : L"");
+    SendMessageW(g_settingsName, EM_SETCUEBANNER, TRUE, (LPARAM)(endpoint ? endpoint->name.c_str() : L"Имя устройства"));
+    EnableWindow(g_settingsName, !id.empty());
+    EnableWindow(g_settingsButtons[0], !id.empty());
+    EnableWindow(g_settingsButtons[1], endpoint && endpoint->available && id != audio::Configured(1));
+    EnableWindow(g_settingsButtons[2], endpoint && endpoint->available && id != audio::Configured(0));
+    EnableWindow(g_settingsButtons[3], !primary && (IsExtra(id) || (endpoint && endpoint->available)));
+    SetWindowTextW(g_settingsButtons[3], IsExtra(id) ? L"Удалить из списка" : L"Добавить");
+}
+
+void PopulateOutputSettings(const std::wstring& selected = {}) {
+    g_optionIds.clear();
+    SendMessageW(g_settingsList, LB_RESETCONTENT, 0, 0);
+    auto append = [&](const std::wstring& id) {
+        if (id.empty() || std::find(g_optionIds.begin(), g_optionIds.end(), id) != g_optionIds.end()) return;
+        const auto* endpoint = audio::Find(id);
+        const auto name = endpoint ? endpoint->Label() : L"Устройство не найдено";
+        const auto index = SendMessageW(g_settingsList, LB_ADDSTRING, 0, (LPARAM)name.c_str());
+        if (index < 0) return;
+        g_optionIds.push_back(id);
+        if (id == selected) SendMessageW(g_settingsList, LB_SETCURSEL, index, 0);
+    };
+    if (!g_adding) {
+        append(audio::Configured(0));
+        append(audio::Configured(1));
+        for (const auto& id : audio::ExtraOutputs()) append(id);
+    }
+    for (const auto& endpoint : audio::Endpoints()) {
+        if (!endpoint.available) continue;
+        const auto& id = endpoint.id;
+        if (!g_adding || (id != audio::Configured(0) && id != audio::Configured(1) && !IsExtra(id))) append(id);
+    }
+    if (!g_optionIds.empty() && SendMessageW(g_settingsList, LB_GETCURSEL, 0, 0) == LB_ERR)
+        SendMessageW(g_settingsList, LB_SETCURSEL, 0, 0);
+    ShowWindow(g_settingsList, g_optionIds.empty() ? SW_HIDE : SW_SHOW);
+    ShowSelectedOutput();
+    InvalidateRect(g_settingsList, nullptr, TRUE);
+}
+
+void SettingsLayout(HWND window) {
+    Scale p{GetDpiForWindow(window)};
+    RECT r{};
+    GetClientRect(window, &r);
+    int w = r.right - p(44);
+    SendMessageW(g_settingsList, LB_SETITEMHEIGHT, 0, p(43));
+    MoveWindow(g_settingsList, p(22), p(63), w, p(215), TRUE);
+    MoveWindow(g_settingsName, p(22), p(311), w - p(120), p(32), TRUE);
+    MoveWindow(g_settingsButtons[0], r.right - p(131), p(307), p(109), p(39), TRUE);
+    MoveWindow(g_settingsButtons[1], p(22), p(357), p(143), p(38), TRUE);
+    MoveWindow(g_settingsButtons[2], p(174), p(357), p(143), p(38), TRUE);
+    MoveWindow(g_settingsButtons[3], r.right - p(200), p(357), p(178), p(38), TRUE);
+    MoveWindow(g_settingsButtons[4], p(22), p(410), p(208), p(34), TRUE);
+    ShowWindow(g_settingsName, g_adding ? SW_HIDE : SW_SHOW);
+    for (int i = 0; i < 3; ++i) ShowWindow(g_settingsButtons[i], g_adding ? SW_HIDE : SW_SHOW);
+}
+
+void PaintSettingsItem(const DRAWITEMSTRUCT& item) {
+    if (item.itemID >= g_optionIds.size()) return;
+    const auto& id = g_optionIds[item.itemID];
+    const auto* endpoint = audio::Find(id);
+    const auto& r = item.rcItem;
+    const bool selected = (item.itemState & ODS_SELECTED) != 0;
+    Scale p{GetDpiForWindow(item.hwndItem)};
+    Fill(item.hDC, r, kBackground);
+    Rounded(item.hDC, {r.left, r.top + 1, r.right, r.bottom - p(3)}, p(10), selected ? kLine : kSurface);
+    Font label(p(14), FW_SEMIBOLD, L"Inter");
+    Font badge(p(12), FW_NORMAL, L"Inter");
+    const auto status = id == audio::Configured(0) ? L"Колонки" : id == audio::Configured(1) ? L"Наушники" :
+                        IsExtra(id) ? L"Добавлено" : L"";
+    const std::wstring name = endpoint ? endpoint->Label() : L"Устройство не найдено";
+    Text(item.hDC, {r.left + p(13), r.top, r.right - p(100), r.bottom}, name,
+         endpoint && endpoint->available ? kInk : kQuiet, label.handle);
+    Text(item.hDC, {r.right - p(96), r.top, r.right - p(14), r.bottom}, status, kAccent, badge.handle, DT_RIGHT);
+    FocusAccent(item, r, p);
+}
+
+LRESULT CALLBACK SettingsProc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+        case WM_CREATE: {
+            HINSTANCE inst = (HINSTANCE)GetWindowLongPtrW(window, GWLP_HINSTANCE);
+            g_settingsList = MakeList(window, OutputList, L"Доступные аудиовыходы", inst);
+            ShowWindow(g_settingsList, SW_SHOW);
+            g_settingsName = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL,
+                                            0, 0, 0, 0, window, (HMENU)(UINT_PTR)OutputName, inst, nullptr);
+            g_settingsFont = CreateFontW(-MulDiv(15, GetDpiForWindow(window), 96), 0, 0, 0, FW_NORMAL, 0, 0, 0,
+                                         DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+            SendMessageW(g_settingsName, WM_SETFONT, (WPARAM)g_settingsFont, 0);
+            SendMessageW(g_settingsName, EM_SETLIMITTEXT, 127, 0);
+            const wchar_t* labels[]{L"Сохранить", L"В колонки", L"В наушники", L"Добавить", L"Подключить в Windows"};
+            for (UINT i = 0; i < ARRAYSIZE(g_settingsButtons); ++i)
+                g_settingsButtons[i] = CreateWindowW(L"BUTTON", labels[i], WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                    0, 0, 0, 0, window, (HMENU)(UINT_PTR)(SaveName + i), inst, nullptr);
+            SettingsLayout(window);
+            PopulateOutputSettings();
+            return 0;
+        }
+        case WM_SIZE:
+            SettingsLayout(window);
+            return 0;
+        case WM_COMMAND: {
+            const auto id = LOWORD(wp);
+            if (id == OutputList) {
+                if (HIWORD(wp) == LBN_SELCHANGE) ShowSelectedOutput();
+                if (HIWORD(wp) == LBN_DBLCLK && g_adding && !SelectedOutput().empty())
+                    PostMessageW(window, WM_COMMAND, ToggleExtra, 0);
+                return 0;
+            }
+            if (id == ConnectWindows) {
+                ShellExecuteW(window, L"open", L"ms-settings:bluetooth", nullptr, nullptr, SW_SHOWNORMAL);
+                return 0;
+            }
+            const auto selected = SelectedOutput();
+            if (selected.empty()) return 0;
+            bool ok;
+            if (id == SaveName) {
+                wchar_t label[128]{};
+                GetWindowTextW(g_settingsName, label, ARRAYSIZE(label));
+                std::wstring name(label);
+                const auto first = name.find_first_not_of(L" \t");
+                name = first == std::wstring::npos ? L"" : name.substr(first, name.find_last_not_of(L" \t") - first + 1);
+                ok = audio::Rename(selected, name);
+            } else if (id == ToggleExtra) ok = audio::SaveExtra(selected, !IsExtra(selected));
+            else if (id == SetSpeakers || id == SetHeadphones) ok = audio::Assign(id == SetSpeakers ? 0 : 1, selected);
+            else return 0;
+            if (ok) PostMessageW(g_owner, g_message, panel::AudioSettingsChanged, 0);
+            if (ok && g_adding && id == ToggleExtra) { DestroyWindow(window); return 0; }
+            g_settingsNotice = ok ? L"Сохранено" : L"Не удалось сохранить";
+            PopulateOutputSettings(selected);
+            InvalidateRect(window, nullptr, FALSE);
+            return 0;
+        }
+        case WM_DRAWITEM: {
+            const auto& item = *reinterpret_cast<DRAWITEMSTRUCT*>(lp);
+            if (item.CtlID == OutputList) PaintSettingsItem(item);
+            else DrawButton(item);
+            return TRUE;
+        }
+        case WM_CTLCOLORLISTBOX:
+        case WM_CTLCOLOREDIT: {
+            static HBRUSH background = CreateSolidBrush(kBackground);
+            SetBkColor((HDC)wp, kBackground);
+            SetTextColor((HDC)wp, kInk);
+            return (LRESULT)background;
+        }
+        case WM_PAINT: {
+            PAINTSTRUCT paint{};
+            HDC dc = BeginPaint(window, &paint);
+            RECT r{};
+            GetClientRect(window, &r);
+            Scale p{GetDpiForWindow(window)};
+            Fill(dc, r, kBackground);
+            Font title(p(22), FW_SEMIBOLD, L"Inter");
+            Font small(p(13), FW_NORMAL, L"Inter");
+            Text(dc, {p(22), p(15), r.right - p(22), p(53)},
+                 g_adding ? L"Какой выход добавить?" : L"Аудиовыходы Windows", kInk, title.handle);
+            if (g_optionIds.empty())
+                Text(dc, {p(28), p(64), r.right - p(22), p(108)}, L"Новых доступных выходов нет", kQuiet, small.handle);
+            if (!g_adding) Text(dc, {p(22), p(281), r.right - p(22), p(307)}, L"Имя в Контуре", kQuiet, small.handle);
+            Text(dc, {p(242), p(410), r.right - p(22), p(444)}, g_settingsNotice, kQuiet, small.handle, DT_RIGHT);
+            EndPaint(window, &paint);
+            return 0;
+        }
+        case WM_DESTROY:
+            g_settings = nullptr;
+            DeleteObject(g_settingsFont);
+            g_settingsNotice.clear();
+            return 0;
+    }
+    return DefWindowProcW(window, msg, wp, lp);
+}
+
 }  // namespace
 
 namespace panel {
@@ -340,7 +614,7 @@ void Show(HWND owner, UINT message) {
         const UINT dpi = GetDpiForSystem();
         Scale p{dpi};
         constexpr DWORD style = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
-        RECT size{0, 0, p(850), p(572)};
+        RECT size{0, 0, p(960), p(650)};
         AdjustWindowRectExForDpi(&size, style, FALSE, WS_EX_APPWINDOW | WS_EX_CONTROLPARENT, dpi);
         g_panel = CreateWindowExW(WS_EX_APPWINDOW | WS_EX_CONTROLPARENT, kPanel, L"Контур", style,
                                   CW_USEDEFAULT, CW_USEDEFAULT, size.right - size.left, size.bottom - size.top,
@@ -350,14 +624,57 @@ void Show(HWND owner, UINT message) {
     }
     ShowWindow(g_panel, SW_RESTORE);
     SetForegroundWindow(g_panel);
+    UpdateAudio();
+}
+
+void ShowOutputSettings(bool adding) {
+    if (!g_panel) return;
+    if (g_settings && adding != g_adding) DestroyWindow(g_settings);
+    if (!g_settings) {
+        g_adding = adding;
+        HINSTANCE inst = (HINSTANCE)GetWindowLongPtrW(g_panel, GWLP_HINSTANCE);
+        constexpr wchar_t cls[] = L"KonturSoundSettings";
+        Register(inst, cls, SettingsProc, g_brand);
+        Scale p{GetDpiForWindow(g_panel)};
+        constexpr DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
+        RECT size{0, 0, p(600), p(460)}, owner{};
+        AdjustWindowRectExForDpi(&size, style, FALSE, WS_EX_CONTROLPARENT, p.dpi);
+        GetWindowRect(g_panel, &owner);
+        const int w = size.right - size.left, h = size.bottom - size.top;
+        g_settings = CreateWindowExW(WS_EX_CONTROLPARENT, cls, adding ? L"Добавить устройство" : L"Настроить выходы", style,
+                                     (owner.left + owner.right - w) / 2, (owner.top + owner.bottom - h) / 2,
+                                     w, h, g_panel, nullptr, inst, nullptr);
+        if (!g_settings) return;
+        DarkCaption(g_settings);
+    } else PopulateOutputSettings(SelectedOutput());
+    ShowWindow(g_settings, SW_SHOW);
+    SetForegroundWindow(g_settings);
+    SetFocus(g_settingsList);
 }
 
 void UpdateAudio() {
     if (!g_panel) return;
+    const auto top = SendMessageW(g_extraList, LB_GETTOPINDEX, 0, 0);
+    SendMessageW(g_extraList, WM_SETREDRAW, FALSE, 0);
+    SendMessageW(g_extraList, LB_RESETCONTENT, 0, 0);
+    g_extraIds.clear();
+    for (const auto& id : audio::ExtraOutputs()) {
+        if (id == audio::Configured(0) || id == audio::Configured(1)) continue;
+        const auto* device = audio::Find(id);
+        const auto label = device ? device->Label() : L"Устройство не найдено";
+        const auto index = SendMessageW(g_extraList, LB_ADDSTRING, 0, (LPARAM)label.c_str());
+        g_extraIds.push_back(id);
+        if (id == audio::Current()) SendMessageW(g_extraList, LB_SETCURSEL, index, 0);
+    }
+    if (top >= 0 && (size_t)top < g_extraIds.size()) SendMessageW(g_extraList, LB_SETTOPINDEX, top, 0);
+    SendMessageW(g_extraList, WM_SETREDRAW, TRUE, 0);
     Layout(g_panel);
     InvalidateRect(g_panel, nullptr, FALSE);
     for (HWND button : g_buttons) InvalidateRect(button, nullptr, FALSE);
+    if (g_settings && g_adding) PopulateOutputSettings(SelectedOutput());
 }
+
+std::wstring ExtraId(size_t index) { return index < g_extraIds.size() ? g_extraIds[index] : L""; }
 
 void SetBatteries(std::vector<BatteryRow> rows) {
     if (!g_list) return;
@@ -377,13 +694,22 @@ void SetBatteries(std::vector<BatteryRow> rows) {
     if (!g_rows.empty()) SendMessageW(g_list, LB_SETCURSEL, newSelected, 0);
     if (top >= 0 && top < (int)g_rows.size()) SendMessageW(g_list, LB_SETTOPINDEX, top, 0);
     SendMessageW(g_list, WM_SETREDRAW, TRUE, 0);
-    ShowWindow(g_list, g_audioPage || g_rows.empty() ? SW_HIDE : SW_SHOW);
-    for (int i = 7; i <= 8; ++i) ShowWindow(g_buttons[i], !g_audioPage && !g_rows.empty() ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_list, IsBatteryPage() && !g_rows.empty() ? SW_SHOW : SW_HIDE);
+    for (int i = 4; i <= 5; ++i) ShowWindow(g_buttons[i], IsBatteryPage() && !g_rows.empty() ? SW_SHOW : SW_HIDE);
     InvalidateRect(g_list, nullptr, TRUE);
     InvalidateRect(g_panel, nullptr, FALSE);
 }
 
-bool HandleKeyboard(MSG& message) { return g_panel && IsDialogMessageW(g_panel, &message); }
+bool HandleKeyboard(MSG& message) {
+    if (g_settings && (message.hwnd == g_settings || IsChild(g_settings, message.hwnd))) {
+        if (message.message == WM_KEYDOWN && message.wParam == VK_ESCAPE) {
+            DestroyWindow(g_settings);
+            return true;
+        }
+        return IsDialogMessageW(g_settings, &message);
+    }
+    return g_panel && IsDialogMessageW(g_panel, &message);
+}
 
 void Toast(HWND owner, const RECT& anchor, const std::wstring& text) {
     if (g_toast) DestroyWindow(g_toast);

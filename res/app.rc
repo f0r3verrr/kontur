@@ -17,7 +17,7 @@ BEGIN
       VALUE "ProductName", "Kontur"
       VALUE "FileVersion", "1.0.0"
       VALUE "ProductVersion", "1.0.0"
-      VALUE "OriginalFilename", "WirelessBattery.exe"
+      VALUE "OriginalFilename", "Kontur.exe"
     END
   END
   BLOCK "VarFileInfo"

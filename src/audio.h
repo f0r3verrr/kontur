@@ -9,6 +9,8 @@ struct Endpoint {
     std::wstring id, name;
     bool available = false;
     unsigned form = 0;
+    std::wstring alias;
+    const std::wstring& Label() const { return alias.empty() ? name : alias; }
 };
 
 void Start(HWND owner, UINT message);
@@ -21,6 +23,7 @@ const Endpoint* Find(const std::wstring& id);
 bool Assign(int slot, const std::wstring& id);
 const std::vector<std::wstring>& ExtraOutputs();
 bool SaveExtra(const std::wstring& id, bool include);
+bool Rename(const std::wstring& id, const std::wstring& name);
 std::vector<std::wstring> Cycle();
 std::wstring SwitchTo(const std::wstring& id);  // Empty on success, localized error otherwise.
 }

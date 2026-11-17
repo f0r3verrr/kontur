@@ -91,18 +91,13 @@ void PaintTrace(HDC dc, const RECT& bounds, const RECT& plot, const std::vector<
     graphics.TranslateTransform((REAL)bounds.left, (REAL)bounds.top);
     graphics.SetSmoothingMode(SmoothingModeAntiAlias);
     const RectF frame(0, 0, (REAL)(bounds.right - bounds.left), (REAL)(bounds.bottom - bounds.top));
-    LinearGradientBrush background(frame, Color(49, 31, 61), Color(22, 18, 35), 80.0f);
+    LinearGradientBrush background(frame, Color(39, 37, 57), Color(32, 31, 47), 80.0f);
     graphics.FillRectangle(&background, frame);
-    LinearGradientBrush haze(frame, Color(0, 117, 59, 164), Color(67, 158, 65, 143), 0.0f);
-    graphics.FillRectangle(&haze, frame);
     if (plot.right <= plot.left || plot.bottom <= plot.top) return;
 
     const PointF top(0, (REAL)plot.top - 3 * scale), bottom(0, (REAL)plot.bottom + 3 * scale);
-    LinearGradientBrush fill(top, bottom, Color(78, 235, 113, 175), Color(0, 126, 82, 237));
-    LinearGradientBrush line(top, bottom, Color(255, 222, 161), Color(139, 116, 255));
-    Color stops[]{Color(255, 222, 161), Color(255, 142, 171), Color(207, 147, 255), Color(139, 116, 255)};
-    REAL offsets[]{0.0f, 0.35f, 0.68f, 1.0f};
-    line.SetInterpolationColors(stops, offsets, ARRAYSIZE(stops));
+    LinearGradientBrush fill(top, bottom, Color(58, 184, 167, 255), Color(0, 126, 104, 203));
+    LinearGradientBrush line(top, bottom, Color(222, 210, 255), Color(155, 141, 232));
     Pen grid(Color(46, 214, 179, 233), 1);
     for (int step = 0; step <= 4; ++step) {
         const int y = plot.top + (plot.bottom - plot.top) * step / 4;
@@ -123,8 +118,8 @@ void PaintTrace(HDC dc, const RECT& bounds, const RECT& plot, const std::vector<
         trace.StartFigure();
         trace.AddLines(run.data(), (INT)run.size());
     }
-    for (auto [width, alpha] : { std::pair{15.0f, 16}, std::pair{9.0f, 23}, std::pair{5.0f, 47} }) {
-        Pen glow(Color((BYTE)alpha, 242, 96, 183), width * scale);
+    for (auto [width, alpha] : { std::pair{10.0f, 13}, std::pair{5.0f, 27} }) {
+        Pen glow(Color((BYTE)alpha, 184, 167, 255), width * scale);
         glow.SetLineJoin(LineJoinRound);
         glow.SetStartCap(LineCapRound);
         glow.SetEndCap(LineCapRound);
@@ -138,8 +133,8 @@ void PaintTrace(HDC dc, const RECT& bounds, const RECT& plot, const std::vector<
     for (const auto& run : runs) {
         if (run.size() != 1 && &run != &runs.back()) continue;
         const auto point = run.back();
-        SolidBrush glow(Color(49, 255, 121, 191));
-        SolidBrush core(Color(255, 223, 219));
+        SolidBrush glow(Color(40, 184, 167, 255));
+        SolidBrush core(Color(222, 210, 255));
         const float radius = (&run == &runs.back() ? 4.0f : 2.2f) * scale;
         graphics.FillEllipse(&glow, point.X - radius * 2, point.Y - radius * 2, radius * 4, radius * 4);
         graphics.FillEllipse(&core, point.X - radius, point.Y - radius, radius * 2, radius * 2);
@@ -194,7 +189,7 @@ void PaintChart(HWND window, HDC dc, const RECT& bounds, const DeviceStatus& dev
     DrawTextW(dc, device.name.c_str(), (int)device.name.size(), &name,
               DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
     SelectObject(dc, value);
-    SetTextColor(dc, RGB(255, 196, 192));
+    SetTextColor(dc, kAccent);
     RECT stat{client.right - px(116), px(9), client.right - px(18), px(41)};
     const int percent = device.percent >= 0 ? device.percent : -1;
     const auto current = device.usbOnly ? L"USB" : percent >= 0 ? std::to_wstring(percent) + L"%" : L"–";

@@ -1,4 +1,4 @@
-// Wireless Battery - tray app showing the battery level of wireless mice, headsets and Bluetooth devices.
+// Kontur host: connects the desktop shell with the audio and battery modules.
 #include <windows.h>
 #include <shellapi.h>
 #include <dbt.h>
@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "devices.h"
+#include "battery_monitor.h"
 #include "audio.h"
 #include "history.h"
 #include "panel.h"
@@ -29,7 +30,6 @@ constexpr UINT WM_PANEL_ACTION = WM_APP + 5;
 constexpr UINT WM_SHOW_PANEL = WM_APP + 6;
 constexpr UINT_PTR TIMER_DEBOUNCE = 1;
 constexpr UINT_PTR TIMER_WIDGET = 2;
-constexpr DWORD POLL_INTERVAL_MS = 60 * 1000;
 constexpr int LOW_BATTERY = 15;
 constexpr UINT PLACEHOLDER_ID = 1;
 constexpr UINT AUDIO_ID = 0xFFFF;
@@ -41,7 +41,14 @@ enum MenuId : UINT {
 };
 enum DeviceCmd : UINT { DEV_TOGGLE, DEV_LEFT, DEV_RIGHT, DEV_HISTORY, DEV_STRIDE };
 
-const wchar_t* kAppName = L"Контур";
+constexpr wchar_t kAppName[] = L"Контур";
+constexpr wchar_t kHostWindow[] = L"KonturHost";
+constexpr wchar_t kPreviousWindow[] = L"WirelessBatteryWnd";
+
+HWND RunningHost() {
+    if (HWND existing = FindWindowW(kHostWindow, nullptr)) return existing;
+    return FindWindowW(kPreviousWindow, nullptr);
+}
 const wchar_t* kRunKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const wchar_t* kRunValue = L"WirelessBattery";
 
@@ -49,7 +56,6 @@ const wchar_t* kSettingsKey = L"Software\\WirelessBattery";
 
 HINSTANCE g_inst;
 HWND g_hwnd;
-HANDLE g_refreshEvt, g_stopEvt, g_worker;
 UINT g_taskbarCreatedMsg;
 bool g_lightTaskbar;
 bool g_wantWidget = true;      // user's choice: taskbar widget (default) or tray icons
@@ -514,7 +520,7 @@ void UpdateAudioTray() {
         g_audioLight = g_lightTaskbar;
         g_audioIcon = RenderIcon(headphones ? L"\uE7F6" : L"\uE767", -1, Foreground(), Foreground(), false, true);
     }
-    const auto tip = L"Контур · Звук\n" + (active ? active->name : L"Нет активного выхода");
+    const auto tip = L"Контур · Звук\n" + (active ? active->Label() : L"Нет активного выхода");
     TrayCall(g_audioAdded ? NIM_MODIFY : NIM_ADD, AUDIO_ID, g_audioIcon, tip);
     g_audioAdded = true;
 }
@@ -530,101 +536,19 @@ void AudioToast(const std::wstring& text) {
     panel::Toast(g_hwnd, anchor, text);
 }
 
-UINT ShowAudioMenu(HMENU menu) {
-    ApplyMenuTheme(false);
-    POINT cursor{};
-    GetCursorPos(&cursor);
-    HWND owner = GetForegroundWindow();
-    if (!owner || (owner != g_hwnd && GetWindow(owner, GW_OWNER) != g_hwnd)) owner = g_hwnd;
-    SetForegroundWindow(owner);
-    const auto cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
-                                    cursor.x, cursor.y, 0, owner, nullptr);
-    PostMessageW(owner, WM_NULL, 0, 0);
-    DestroyMenu(menu);
-    ApplyMenuTheme(g_lightTaskbar);
-    return cmd;
-}
-
 void SetAudioOutput(const std::wstring& id) {
     const auto error = audio::SwitchTo(id);
     UpdateAudioTray();
     panel::UpdateAudio();
     const auto* active = audio::Find(audio::Current());
-    AudioToast(error.empty() && active ? L"Звук: " + active->name : error);
+    AudioToast(error.empty() && active ? L"Звук: " + active->Label() : error);
 }
 
-void ChooseExtra(bool add, bool remove = false) {
+void ConfigureAudio(bool adding = false) {
     audio::Refresh();
-    HMENU menu = CreatePopupMenu();
-    std::vector<std::wstring> ids;
-    constexpr UINT connect = 0xFFFE;
-    const auto& extras = audio::ExtraOutputs();
-    if (add) {
-        for (const auto& endpoint : audio::Endpoints()) {
-            if (endpoint.available && endpoint.id != audio::Configured(0) && endpoint.id != audio::Configured(1) &&
-                std::find(extras.begin(), extras.end(), endpoint.id) == extras.end()) ids.push_back(endpoint.id);
-        }
-    } else {
-        ids = extras;
-    }
-    if (ids.empty()) AppendMenuW(menu, MF_GRAYED, 0, add ? L"Нет новых выходов" : L"Нет дополнительных выходов");
-    for (size_t i = 0; i < ids.size(); ++i) {
-        const auto* endpoint = audio::Find(ids[i]);
-        std::wstring label = endpoint ? endpoint->name : L"Устройство больше не найдено";
-        const bool available = endpoint && endpoint->available;
-        if (!available && endpoint) label += L" (недоступно)";
-        UINT flags = !available && !remove ? MF_GRAYED : MF_STRING;
-        if (!add && !remove && ids[i] == audio::Current()) flags |= MF_CHECKED;
-        AppendMenuW(menu, flags, i + 1, label.c_str());
-    }
-    if (add) {
-        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, MF_STRING, connect, L"Подключить новое устройство в Windows");
-    }
-    const UINT cmd = ShowAudioMenu(menu);
-    if (cmd == connect) {
-        ShellExecuteW(g_hwnd, L"open", L"ms-settings:bluetooth", nullptr, nullptr, SW_SHOWNORMAL);
-    } else if (cmd > 0 && cmd <= ids.size()) {
-        if (!add && !remove) SetAudioOutput(ids[cmd - 1]);
-        else if (audio::SaveExtra(ids[cmd - 1], add))
-            AudioToast(add ? L"Выход добавлен в переключатель" : L"Выход убран из переключателя");
-        else AudioToast(L"Не удалось сохранить список выходов");
-    }
+    if (!panel::IsOpen()) OpenPanel();
     panel::UpdateAudio();
-}
-
-void ConfigureAudio() {
-    audio::Refresh();
-    HMENU menu = CreatePopupMenu();
-    std::vector<std::wstring> ids;
-    for (const auto& endpoint : audio::Endpoints())
-        if (endpoint.available || endpoint.id == audio::Configured(0) || endpoint.id == audio::Configured(1))
-            ids.push_back(endpoint.id);
-    if (ids.empty()) AppendMenuW(menu, MF_GRAYED, 0, L"Подключи устройство вывода");
-    for (int slot = 0; slot < 2 && !ids.empty(); ++slot) {
-        HMENU sub = CreatePopupMenu();
-        for (size_t index = 0; index < ids.size(); ++index) {
-            const auto* endpoint = audio::Find(ids[index]);
-            auto label = endpoint->name;
-            if (!endpoint->available) label += L" (недоступно)";
-            UINT flags = MF_STRING;
-            if (ids[index] == audio::Configured(slot)) flags |= MF_CHECKED;
-            if (!endpoint->available || ids[index] == audio::Configured(1 - slot)) flags |= MF_GRAYED;
-            AppendMenuW(sub, flags, 1 + slot * ids.size() + index, label.c_str());
-        }
-        AppendMenuW(menu, MF_POPUP, (UINT_PTR)sub, slot == 0 ? L"Колонки" : L"Наушники");
-    }
-    constexpr UINT add = 0xFFFE, remove = 0xFFFD;
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, add, L"Добавить устройство…");
-    if (!audio::ExtraOutputs().empty()) AppendMenuW(menu, MF_STRING, remove, L"Убрать дополнительный выход…");
-    const UINT cmd = ShowAudioMenu(menu);
-    if (cmd == add || cmd == remove) ChooseExtra(cmd == add, cmd == remove);
-    else if (cmd > 0 && cmd <= 2 * ids.size() &&
-        !audio::Assign((cmd - 1) / ids.size(), ids[(cmd - 1) % ids.size()]))
-        AudioToast(L"Не удалось сохранить выбранный выход");
-    panel::UpdateAudio();
-    UpdateAudioTray();
+    panel::ShowOutputSettings(adding);
 }
 
 void SwitchAudio(int slot) {
@@ -816,7 +740,7 @@ void ShowMenu() {
     switch (cmd) {
         case ID_OPEN_PANEL: OpenPanel(); break;
         case ID_CONFIGURE_AUDIO: ConfigureAudio(); break;
-        case ID_REFRESH: SetEvent(g_refreshEvt); break;
+        case ID_REFRESH: battery_monitor::Refresh(); break;
         case ID_AUTOSTART: SetAutostart(!AutostartEnabled()); break;
         case ID_HIDE_LAST_KNOWN: SetHideLastKnown(!g_hideLastKnown); break;
         case ID_WIDGET_BACKGROUND: SetWidgetBackground(!g_widgetBackground); break;
@@ -850,15 +774,6 @@ void OpenHistoryOrMenu(UINT uid) {
 }
 
 // ---- worker thread ----------------------------------------------------------------------------
-
-DWORD WINAPI Worker(LPVOID) {
-    for (;;) {
-        auto* v = new std::vector<DeviceStatus>(PollAllDevices());
-        if (!PostMessageW(g_hwnd, WM_RESULTS, 0, (LPARAM)v)) delete v;
-        HANDLE hs[2] = { g_stopEvt, g_refreshEvt };
-        if (WaitForMultipleObjects(2, hs, FALSE, POLL_INTERVAL_MS) == WAIT_OBJECT_0) return 0;
-    }
-}
 
 void RefreshSoon(UINT ms) { SetTimer(g_hwnd, TIMER_DEBOUNCE, ms, nullptr); }
 
@@ -900,8 +815,15 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_PANEL_ACTION:
             if (wp == panel::SelectOutput) SwitchAudio((int)lp);
             if (wp == panel::ConfigureOutput) ConfigureAudio();
-            if (wp == panel::AddOutput) ChooseExtra(true);
-            if (wp == panel::ShowExtras) ChooseExtra(false);
+            if (wp == panel::AddOutput) ConfigureAudio(true);
+            if (wp == panel::SelectExtra) {
+                const auto id = panel::ExtraId((size_t)lp);
+                if (!id.empty()) SetAudioOutput(id);
+            }
+            if (wp == panel::AudioSettingsChanged) {
+                UpdateAudioTray();
+                panel::UpdateAudio();
+            }
             return 0;
         case WM_WIDGET_CLICK:
             OpenHistoryOrMenu((UINT)wp);
@@ -916,7 +838,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (wp == PBT_APMRESUMEAUTOMATIC) RefreshSoon(5000);
             return TRUE;
         case WM_TIMER:
-            if (wp == TIMER_DEBOUNCE) { KillTimer(h, TIMER_DEBOUNCE); SetEvent(g_refreshEvt); }
+            if (wp == TIMER_DEBOUNCE) { KillTimer(h, TIMER_DEBOUNCE); battery_monitor::Refresh(); }
             if (wp == TIMER_WIDGET) Reconcile();
             return 0;
         case WM_SETTINGCHANGE:
@@ -937,8 +859,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (g_audioIcon) DestroyIcon(g_audioIcon);
             KillTimer(h, TIMER_WIDGET);
             widget::Destroy();
-            SetEvent(g_stopEvt);
-            if (g_worker) WaitForSingleObject(g_worker, 5000);
+            battery_monitor::Stop();
             for (auto& [k, e] : g_entries) {
                 if (e.added) TrayDelete(e.uid);
                 if (e.icon) DestroyIcon(e.icon);
@@ -950,7 +871,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(h, msg, wp, lp);
 }
 
-// `WirelessBattery.exe --list` prints what it finds, `--dump` every HID collection.
+// `Kontur.exe --list` prints what it finds, `--dump` every HID collection.
 int ListToConsole(bool dump) {
     HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
     if (!out || out == INVALID_HANDLE_VALUE) {
@@ -991,20 +912,32 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     if (cmdLine && wcsstr(cmdLine, L"--list")) return ListToConsole(false);
     if (cmdLine && wcsstr(cmdLine, L"--dump")) return ListToConsole(true);
     if (cmdLine && wcsstr(cmdLine, L"--quit")) {  // used by the installer before upgrading/uninstalling
-        if (HWND w = FindWindowW(L"WirelessBatteryWnd", nullptr)) {
+        if (HWND w = RunningHost()) {
             PostMessageW(w, WM_CLOSE, 0, 0);
-            for (int i = 0; i < 50 && FindWindowW(L"WirelessBatteryWnd", nullptr); i++) Sleep(100);
+            for (int i = 0; i < 50 && RunningHost(); i++) Sleep(100);
         }
         return 0;
     }
     g_inst = inst;
 
-    HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\WirelessBatteryTray");
     const bool background = cmdLine && wcsstr(cmdLine, L"--background");
+    HANDLE mutex = CreateMutexW(nullptr, FALSE, L"Local\\Kontur");
+    if (!mutex) return 1;
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        if (!background)
-            if (HWND existing = FindWindowW(L"WirelessBatteryWnd", nullptr)) PostMessageW(existing, WM_SHOW_PANEL, 0, 0);
+        if (!background) {
+            if (HWND existing = FindWindowW(kHostWindow, nullptr))
+                PostMessageW(existing, WM_SHOW_PANEL, 0, 0);
+        }
         CloseHandle(mutex);
+        return 0;
+    }
+    // Prevent the previous portable build from competing for the same receivers.
+    HANDLE legacyGuard = CreateMutexW(nullptr, FALSE, L"Local\\WirelessBatteryTray");
+    if (!legacyGuard || GetLastError() == ERROR_ALREADY_EXISTS) {
+        if (legacyGuard) CloseHandle(legacyGuard);
+        CloseHandle(mutex);
+        if (!background) MessageBoxW(nullptr, L"Закрой предыдущую версию через Exit в трее и снова запусти Контур.",
+                                    kAppName, MB_OK | MB_ICONINFORMATION);
         return 0;
     }
 
@@ -1015,19 +948,21 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     WNDCLASSEXW wc{ sizeof(wc) };
     wc.lpfnWndProc = WndProc;
     wc.hInstance = inst;
-    wc.lpszClassName = L"WirelessBatteryWnd";
+    wc.lpszClassName = kHostWindow;
     RegisterClassExW(&wc);
     // A hidden top-level window (not message-only) so it receives the TaskbarCreated broadcast.
     g_hwnd = CreateWindowExW(WS_EX_TOOLWINDOW, wc.lpszClassName, kAppName, WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, inst, nullptr);
-    if (!g_hwnd) return 1;
+    if (!g_hwnd) {
+        CloseHandle(legacyGuard);
+        CloseHandle(mutex);
+        return 1;
+    }
 
     DEV_BROADCAST_DEVICEINTERFACE_W filter{ sizeof(filter) };
     filter.dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE;
     filter.dbcc_classguid = GUID_DEVINTERFACE_HID;
     HDEVNOTIFY notify = RegisterDeviceNotificationW(g_hwnd, &filter, DEVICE_NOTIFY_WINDOW_HANDLE);
 
-    g_refreshEvt = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    g_stopEvt = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     g_wantWidget = LoadWidgetMode();
     g_hideLastKnown = LoadHideLastKnown();
     g_widgetBackground = LoadWidgetBackground();
@@ -1040,7 +975,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     UpdateAudioTray();
     if (!background) OpenPanel();
     SetTimer(g_hwnd, TIMER_WIDGET, 1000, nullptr);
-    g_worker = CreateThread(nullptr, 0, Worker, nullptr, 0, nullptr);
+    battery_monitor::Start(g_hwnd, WM_RESULTS);
 
     MSG m;
     while (GetMessageW(&m, nullptr, 0, 0) > 0) {
@@ -1051,8 +986,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     // drain results posted after shutdown started
     while (PeekMessageW(&m, nullptr, WM_RESULTS, WM_RESULTS, PM_REMOVE)) delete reinterpret_cast<std::vector<DeviceStatus>*>(m.lParam);
     if (notify) UnregisterDeviceNotification(notify);
-    if (g_worker) CloseHandle(g_worker);
-    ReleaseMutex(mutex);
+    CloseHandle(legacyGuard);
     CloseHandle(mutex);
     return 0;
 }
