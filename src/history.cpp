@@ -1,5 +1,6 @@
 #include "history.h"
 #include "appearance.h"
+#include <gdiplus.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -75,39 +76,138 @@ std::wstring Ago(int64_t timestamp, bool russian = false) {
     return std::to_wstring(minutes / 1440) + (russian ? L" дн. назад" : L" d ago");
 }
 
+using ChartRun = std::vector<Gdiplus::PointF>;
+
+void PaintTrace(HDC dc, const RECT& bounds, const RECT& plot, const std::vector<ChartRun>& runs, float scale) {
+    using namespace Gdiplus;
+    struct GraphicsRuntime {
+        ULONG_PTR token = 0;
+        GraphicsRuntime() { GdiplusStartupInput input; GdiplusStartup(&token, &input, nullptr); }
+        ~GraphicsRuntime() { if (token) GdiplusShutdown(token); }
+    };
+    static GraphicsRuntime runtime;
+    if (!runtime.token) return;
+    Graphics graphics(dc);
+    graphics.TranslateTransform((REAL)bounds.left, (REAL)bounds.top);
+    graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+    const RectF frame(0, 0, (REAL)(bounds.right - bounds.left), (REAL)(bounds.bottom - bounds.top));
+    LinearGradientBrush background(frame, Color(49, 31, 61), Color(22, 18, 35), 80.0f);
+    graphics.FillRectangle(&background, frame);
+    LinearGradientBrush haze(frame, Color(0, 117, 59, 164), Color(67, 158, 65, 143), 0.0f);
+    graphics.FillRectangle(&haze, frame);
+    if (plot.right <= plot.left || plot.bottom <= plot.top) return;
+
+    const PointF top(0, (REAL)plot.top - 3 * scale), bottom(0, (REAL)plot.bottom + 3 * scale);
+    LinearGradientBrush fill(top, bottom, Color(78, 235, 113, 175), Color(0, 126, 82, 237));
+    LinearGradientBrush line(top, bottom, Color(255, 222, 161), Color(139, 116, 255));
+    Color stops[]{Color(255, 222, 161), Color(255, 142, 171), Color(207, 147, 255), Color(139, 116, 255)};
+    REAL offsets[]{0.0f, 0.35f, 0.68f, 1.0f};
+    line.SetInterpolationColors(stops, offsets, ARRAYSIZE(stops));
+    Pen grid(Color(46, 214, 179, 233), 1);
+    for (int step = 0; step <= 4; ++step) {
+        const int y = plot.top + (plot.bottom - plot.top) * step / 4;
+        graphics.DrawLine(&grid, (int)plot.left, y, (int)plot.right, y);
+    }
+
+    GraphicsPath trace;
+    for (const auto& run : runs) {
+        if (run.size() < 2) continue;
+        GraphicsPath area;
+        area.AddLines(run.data(), (INT)run.size());
+        const auto& start = run.front();
+        const auto& end = run.back();
+        area.AddLine(end, PointF(end.X, (REAL)plot.bottom));
+        area.AddLine(PointF(end.X, (REAL)plot.bottom), PointF(start.X, (REAL)plot.bottom));
+        area.CloseFigure();
+        graphics.FillPath(&fill, &area);
+        trace.StartFigure();
+        trace.AddLines(run.data(), (INT)run.size());
+    }
+    for (auto [width, alpha] : { std::pair{15.0f, 16}, std::pair{9.0f, 23}, std::pair{5.0f, 47} }) {
+        Pen glow(Color((BYTE)alpha, 242, 96, 183), width * scale);
+        glow.SetLineJoin(LineJoinRound);
+        glow.SetStartCap(LineCapRound);
+        glow.SetEndCap(LineCapRound);
+        graphics.DrawPath(&glow, &trace);
+    }
+    Pen edge(&line, 2.8f * scale);
+    edge.SetLineJoin(LineJoinRound);
+    edge.SetStartCap(LineCapRound);
+    edge.SetEndCap(LineCapRound);
+    graphics.DrawPath(&edge, &trace);
+    for (const auto& run : runs) {
+        if (run.size() != 1 && &run != &runs.back()) continue;
+        const auto point = run.back();
+        SolidBrush glow(Color(49, 255, 121, 191));
+        SolidBrush core(Color(255, 223, 219));
+        const float radius = (&run == &runs.back() ? 4.0f : 2.2f) * scale;
+        graphics.FillEllipse(&glow, point.X - radius * 2, point.Y - radius * 2, radius * 4, radius * 4);
+        graphics.FillEllipse(&core, point.X - radius, point.Y - radius, radius * 2, radius * 2);
+    }
+}
+
 void PaintChart(HWND window, HDC dc, const RECT& bounds, const DeviceStatus& device, bool oneDay) {
     using namespace appearance;
     const int saved = SaveDC(dc);
     IntersectClipRect(dc, bounds.left, bounds.top, bounds.right, bounds.bottom);
-    SetViewportOrgEx(dc, bounds.left, bounds.top, nullptr);
     const RECT client{0, 0, bounds.right - bounds.left, bounds.bottom - bounds.top};
-    SetDCBrushColor(dc, kSurface);
-    FillRect(dc, &client, (HBRUSH)GetStockObject(DC_BRUSH));
-    SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, kQuiet);
     const UINT dpi = GetDpiForWindow(window);
     auto px = [dpi](int x) { return MulDiv(x, dpi, 96); };
-    HFONT font = CreateFontW(-px(14), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                             DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+    const RECT plot{px(53), px(72), client.right - px(50), client.bottom - px(34)};
+    const auto now = Now();
+    const auto range = oneDay ? kDay : kWeek;
+    const auto& record = Load(device.key);
+    Reading previous{};
+    Gdiplus::PointF last;
+    std::vector<ChartRun> runs;
+    if (plot.right > plot.left && plot.bottom > plot.top) {
+        for (const auto& sample : record.readings) {
+            if (sample.time < now - range || sample.time > now || sample.percent < 0 || sample.percent > 100) continue;
+            const auto x = (float)(plot.left + (sample.time - (now - range)) * (plot.right - plot.left) / double(range));
+            const auto y = (float)(plot.bottom - (plot.bottom - plot.top) * sample.percent / 100.0);
+            if (!previous.time || sample.time - previous.time > kSampleInterval * 4 / 3) runs.emplace_back();
+            else if (last.Y != y) runs.back().emplace_back(x, last.Y);
+            runs.back().emplace_back(x, y);
+            last = {x, y};
+            previous = sample;
+        }
+    }
+
+    SetDCBrushColor(dc, kSurface);
+    FillRect(dc, &bounds, (HBRUSH)GetStockObject(DC_BRUSH));
+    PaintTrace(dc, bounds, plot, runs, dpi / 96.0f);
+    SetViewportOrgEx(dc, bounds.left, bounds.top, nullptr);
+    SetBkMode(dc, TRANSPARENT);
+    auto makeFont = [&](int size, int weight) {
+        return CreateFontW(-px(size), 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                           0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+    };
+    HFONT font = makeFont(12, FW_NORMAL), title = makeFont(17, FW_SEMIBOLD), value = makeFont(26, FW_SEMIBOLD);
     HGDIOBJ oldFont = SelectObject(dc, font);
     auto label = [dc](int x, int y, const std::wstring& text) {
         TextOutW(dc, x, y, text.c_str(), (int)text.size());
     };
     const auto summary = history::ChargeSummary(device, true);
     SetTextColor(dc, kInk);
-    label(px(16), px(14), summary.empty() ? L"Событий зарядки пока нет" : summary);
+    SelectObject(dc, title);
+    RECT name{px(16), px(10), client.right - px(124), px(37)};
+    DrawTextW(dc, device.name.c_str(), (int)device.name.size(), &name,
+              DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+    SelectObject(dc, value);
+    SetTextColor(dc, RGB(255, 196, 192));
+    RECT stat{client.right - px(116), px(9), client.right - px(18), px(41)};
+    const int percent = device.percent >= 0 ? device.percent : -1;
+    const auto current = device.usbOnly ? L"USB" : percent >= 0 ? std::to_wstring(percent) + L"%" : L"–";
+    DrawTextW(dc, current.c_str(), (int)current.size(), &stat, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+    SelectObject(dc, font);
     SetTextColor(dc, kQuiet);
+    if (!summary.empty()) label(px(16), px(41), summary);
 
-    const int left = px(55), right = client.right - px(46);
-    const int top = px(52), bottom = client.bottom - px(38);
+    const auto [left, top, right, bottom] = plot;
     if (right > left && bottom > top) {
-        HPEN grid = CreatePen(PS_SOLID, 1, kLine);
-        HGDIOBJ oldPen = SelectObject(dc, grid);
         for (int percent : {100, 75, 50, 25, 0}) {
             const int y = bottom - (bottom - top) * percent / 100;
-            label(px(12), y - px(8), std::to_wstring(percent) + L"%");
-            MoveToEx(dc, left, y, nullptr);
-            LineTo(dc, right, y);
+            label(px(13), y - px(7), std::to_wstring(percent) + L"%");
         }
         const int ticks = oneDay ? 4 : 7;
         for (int tick = 0; tick <= ticks; ++tick) {
@@ -116,41 +216,12 @@ void PaintChart(HWND window, HDC dc, const RECT& bounds, const DeviceStatus& dev
                   std::to_wstring((ticks - tick) * (oneDay ? 6 : 1)) + (oneDay ? L" ч" : L" д"));
         }
 
-        HPEN trace = CreatePen(PS_SOLID, px(2), kAccent);
-        SelectObject(dc, trace);
-        const auto now = Now();
-        const auto range = oneDay ? kDay : kWeek;
-        Reading previous{};
-        int lastX = 0, lastY = 0;
-        for (const auto& sample : Load(device.key).readings) {
-            if (sample.time < now - range || sample.time > now || sample.percent < 0 || sample.percent > 100)
-                continue;
-            const int x = left + (int)((sample.time - (now - range)) * (right - left) / range);
-            const int y = bottom - (int)((bottom - top) * sample.percent / 100);
-            if (previous.time && sample.time - previous.time <= kSampleInterval * 4 / 3) {
-                MoveToEx(dc, lastX, lastY, nullptr);
-                LineTo(dc, x, lastY);
-                LineTo(dc, x, y);
-            }
-            MoveToEx(dc, x - px(2), y, nullptr);
-            LineTo(dc, x + px(2), y);
-            lastX = x;
-            lastY = y;
-            previous = sample;
-        }
         if (!previous.time) label(left + px(12), top + px(14), L"Пока нет замеров заряда");
-        else {
-            SetDCBrushColor(dc, kAccent);
-            HGDIOBJ brush = SelectObject(dc, GetStockObject(DC_BRUSH));
-            Ellipse(dc, lastX - px(3), lastY - px(3), lastX + px(4), lastY + px(4));
-            SelectObject(dc, brush);
-        }
-        SelectObject(dc, oldPen);
-        DeleteObject(trace);
-        DeleteObject(grid);
     }
     SelectObject(dc, oldFont);
     DeleteObject(font);
+    DeleteObject(title);
+    DeleteObject(value);
     RestoreDC(dc, saved);
 }
 
