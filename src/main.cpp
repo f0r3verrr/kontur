@@ -530,6 +530,69 @@ void AudioToast(const std::wstring& text) {
     panel::Toast(g_hwnd, anchor, text);
 }
 
+UINT ShowAudioMenu(HMENU menu) {
+    ApplyMenuTheme(false);
+    POINT cursor{};
+    GetCursorPos(&cursor);
+    HWND owner = GetForegroundWindow();
+    if (!owner || (owner != g_hwnd && GetWindow(owner, GW_OWNER) != g_hwnd)) owner = g_hwnd;
+    SetForegroundWindow(owner);
+    const auto cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
+                                    cursor.x, cursor.y, 0, owner, nullptr);
+    PostMessageW(owner, WM_NULL, 0, 0);
+    DestroyMenu(menu);
+    ApplyMenuTheme(g_lightTaskbar);
+    return cmd;
+}
+
+void SetAudioOutput(const std::wstring& id) {
+    const auto error = audio::SwitchTo(id);
+    UpdateAudioTray();
+    panel::UpdateAudio();
+    const auto* active = audio::Find(audio::Current());
+    AudioToast(error.empty() && active ? L"Звук: " + active->name : error);
+}
+
+void ChooseExtra(bool add, bool remove = false) {
+    audio::Refresh();
+    HMENU menu = CreatePopupMenu();
+    std::vector<std::wstring> ids;
+    constexpr UINT connect = 0xFFFE;
+    const auto& extras = audio::ExtraOutputs();
+    if (add) {
+        for (const auto& endpoint : audio::Endpoints()) {
+            if (endpoint.available && endpoint.id != audio::Configured(0) && endpoint.id != audio::Configured(1) &&
+                std::find(extras.begin(), extras.end(), endpoint.id) == extras.end()) ids.push_back(endpoint.id);
+        }
+    } else {
+        ids = extras;
+    }
+    if (ids.empty()) AppendMenuW(menu, MF_GRAYED, 0, add ? L"Нет новых выходов" : L"Нет дополнительных выходов");
+    for (size_t i = 0; i < ids.size(); ++i) {
+        const auto* endpoint = audio::Find(ids[i]);
+        std::wstring label = endpoint ? endpoint->name : L"Устройство больше не найдено";
+        const bool available = endpoint && endpoint->available;
+        if (!available && endpoint) label += L" (недоступно)";
+        UINT flags = !available && !remove ? MF_GRAYED : MF_STRING;
+        if (!add && !remove && ids[i] == audio::Current()) flags |= MF_CHECKED;
+        AppendMenuW(menu, flags, i + 1, label.c_str());
+    }
+    if (add) {
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING, connect, L"Подключить новое устройство в Windows");
+    }
+    const UINT cmd = ShowAudioMenu(menu);
+    if (cmd == connect) {
+        ShellExecuteW(g_hwnd, L"open", L"ms-settings:bluetooth", nullptr, nullptr, SW_SHOWNORMAL);
+    } else if (cmd > 0 && cmd <= ids.size()) {
+        if (!add && !remove) SetAudioOutput(ids[cmd - 1]);
+        else if (audio::SaveExtra(ids[cmd - 1], add))
+            AudioToast(add ? L"Выход добавлен в переключатель" : L"Выход убран из переключателя");
+        else AudioToast(L"Не удалось сохранить список выходов");
+    }
+    panel::UpdateAudio();
+}
+
 void ConfigureAudio() {
     audio::Refresh();
     HMENU menu = CreatePopupMenu();
@@ -551,16 +614,13 @@ void ConfigureAudio() {
         }
         AppendMenuW(menu, MF_POPUP, (UINT_PTR)sub, slot == 0 ? L"Колонки" : L"Наушники");
     }
-    POINT cursor{};
-    GetCursorPos(&cursor);
-    HWND owner = GetForegroundWindow();
-    if (!owner || (owner != g_hwnd && GetWindow(owner, GW_OWNER) != g_hwnd)) owner = g_hwnd;
-    SetForegroundWindow(owner);
-    const auto cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
-                                    cursor.x, cursor.y, 0, owner, nullptr);
-    PostMessageW(owner, WM_NULL, 0, 0);
-    DestroyMenu(menu);
-    if (cmd > 0 && cmd <= 2 * ids.size() &&
+    constexpr UINT add = 0xFFFE, remove = 0xFFFD;
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, add, L"Добавить устройство…");
+    if (!audio::ExtraOutputs().empty()) AppendMenuW(menu, MF_STRING, remove, L"Убрать дополнительный выход…");
+    const UINT cmd = ShowAudioMenu(menu);
+    if (cmd == add || cmd == remove) ChooseExtra(cmd == add, cmd == remove);
+    else if (cmd > 0 && cmd <= 2 * ids.size() &&
         !audio::Assign((cmd - 1) / ids.size(), ids[(cmd - 1) % ids.size()]))
         AudioToast(L"Не удалось сохранить выбранный выход");
     panel::UpdateAudio();
@@ -570,23 +630,23 @@ void ConfigureAudio() {
 void SwitchAudio(int slot) {
     audio::Refresh();
     if (slot < 0) {
-        if (audio::Configured(0).empty() || audio::Configured(1).empty()) {
+        const auto cycle = audio::Cycle();
+        if (cycle.empty() || (cycle.size() == 1 && cycle.front() == audio::Current())) {
             UpdateAudioTray();
-            OpenPanel();
-            AudioToast(L"Выбери колонки и наушники в настройках");
+            if (audio::Configured(0).empty() || audio::Configured(1).empty()) OpenPanel();
+            AudioToast(L"Для переключения нужен ещё один доступный выход");
             return;
         }
-        slot = audio::Current() == audio::Configured(1) ? 0 : 1;
+        auto next = std::find(cycle.begin(), cycle.end(), audio::Current());
+        if (next == cycle.end() || ++next == cycle.end()) next = cycle.begin();
+        SetAudioOutput(*next);
+        return;
     }
     if (audio::Configured(slot).empty()) {
         ConfigureAudio();
         return;
     }
-    const auto error = audio::SwitchTo(slot);
-    UpdateAudioTray();
-    panel::UpdateAudio();
-    const auto* active = audio::Find(audio::Current());
-    AudioToast(error.empty() && active ? L"Звук: " + active->name : error);
+    SetAudioOutput(audio::Configured(slot));
 }
 
 void OnResults(std::vector<DeviceStatus>& results) {
@@ -840,6 +900,8 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_PANEL_ACTION:
             if (wp == panel::SelectOutput) SwitchAudio((int)lp);
             if (wp == panel::ConfigureOutput) ConfigureAudio();
+            if (wp == panel::AddOutput) ChooseExtra(true);
+            if (wp == panel::ShowExtras) ChooseExtra(false);
             return 0;
         case WM_WIDGET_CLICK:
             OpenHistoryOrMenu((UINT)wp);

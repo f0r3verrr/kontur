@@ -13,7 +13,7 @@ struct BatteryRow {
     bool low;
 };
 
-enum Action : UINT { SelectOutput, ConfigureOutput };
+enum Action : UINT { SelectOutput, ConfigureOutput, AddOutput, ShowExtras };
 
 bool IsOpen();
 void Show(HWND owner, UINT message);

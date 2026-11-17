@@ -77,6 +77,7 @@ ComPtr<Notifications> g_notifications;
 bool g_com;
 std::vector<audio::Endpoint> g_endpoints;
 std::array<std::wstring, 2> g_slots;
+std::vector<std::wstring> g_extra;
 std::wstring g_current;
 
 std::wstring DeviceId(IMMDevice* device) {
@@ -134,6 +135,18 @@ void Start(HWND owner, UINT message) {
         DWORD bytes = sizeof(buffer);
         if (RegGetValueW(HKEY_CURRENT_USER, kSettings, kSlots[i], RRF_RT_REG_SZ,
                          nullptr, buffer, &bytes) == ERROR_SUCCESS) g_slots[i] = buffer;
+    }
+    wchar_t saved[8192]{};
+    DWORD bytes = sizeof(saved);
+    if (RegGetValueW(HKEY_CURRENT_USER, kSettings, L"AudioExtraOutputs", RRF_RT_REG_SZ,
+                     nullptr, saved, &bytes) == ERROR_SUCCESS) {
+        std::wstring list(saved);
+        for (size_t pos = 0; pos < list.size();) {
+            const auto end = list.find(L'\n', pos);
+            g_extra.push_back(list.substr(pos, end - pos));
+            if (end == std::wstring::npos) break;
+            pos = end + 1;
+        }
     }
     Refresh();
 }
@@ -196,8 +209,36 @@ bool Assign(int slot, const std::wstring& id) {
     return true;
 }
 
-std::wstring SwitchTo(int slot) {
-    const auto& id = g_slots[slot];
+const std::vector<std::wstring>& ExtraOutputs() { return g_extra; }
+
+bool SaveExtra(const std::wstring& id, bool include) {
+    auto next = g_extra;
+    const auto found = std::find(next.begin(), next.end(), id);
+    if (include && found == next.end()) next.push_back(id);
+    if (!include && found != next.end()) next.erase(found);
+    std::wstring data;
+    for (const auto& entry : next) data += entry + L"\n";
+    if (data.size() >= 8192) return false;
+    const DWORD bytes = (DWORD)((data.size() + 1) * sizeof(wchar_t));
+    if (RegSetKeyValueW(HKEY_CURRENT_USER, kSettings, L"AudioExtraOutputs", REG_SZ, data.c_str(), bytes) != ERROR_SUCCESS)
+        return false;
+    g_extra = std::move(next);
+    return true;
+}
+
+std::vector<std::wstring> Cycle() {
+    std::vector<std::wstring> result;
+    auto append = [&](const std::wstring& id) {
+        const auto* endpoint = Find(id);
+        if (endpoint && endpoint->available && std::find(result.begin(), result.end(), id) == result.end())
+            result.push_back(id);
+    };
+    for (const auto& id : g_slots) append(id);
+    for (const auto& id : g_extra) append(id);
+    return result;
+}
+
+std::wstring SwitchTo(const std::wstring& id) {
     if (id.empty()) return L"Сначала выбери два выхода в настройках";
     const auto* target = Find(id);
     if (!target || !target->available) return L"Выбранный выход сейчас недоступен";

@@ -14,10 +14,11 @@ constexpr wchar_t kToast[] = L"KonturToast";
 constexpr wchar_t kSpeakers[] = L"Колонки";
 constexpr wchar_t kHeadphones[] = L"Наушники";
 constexpr const wchar_t* kLabels[]{kSpeakers, kHeadphones};
-enum Control : UINT { Speakers = 100, Headphones, Configure, BatteryPage, AudioPage, Batteries };
-HWND g_panel, g_owner, g_buttons[5], g_list, g_toast;
+enum Control : UINT { Speakers = 100, Headphones, Configure, BatteryPage, AudioPage, Add, Extras, Day, Week, Batteries };
+HWND g_panel, g_owner, g_buttons[9], g_list, g_toast;
 UINT g_message;
 bool g_audioPage;
+bool g_oneDay = true;
 HICON g_brand;
 std::vector<panel::BatteryRow> g_rows;
 
@@ -56,19 +57,30 @@ struct Scale {
     int operator()(int dip) const { return MulDiv(dip, dpi, 96); }
 };
 
+int ContentWidth(const RECT& r, Scale p) {
+    return (std::min)(int(r.right) - p(248), p(980));
+}
+
 void Layout(HWND window) {
     Scale p{GetDpiForWindow(window)};
     RECT r{};
     GetClientRect(window, &r);
     const int left = p(218);
-    const int content = r.right - left - p(30);
+    const int content = ContentWidth(r, p);
     const int column = (content - p(12)) / 2;
-    MoveWindow(g_buttons[2], r.right - p(202), p(32), p(172), p(38), TRUE);
+    MoveWindow(g_buttons[2], left + content - p(172), p(32), p(172), p(38), TRUE);
     MoveWindow(g_buttons[0], left, p(225), column, p(82), TRUE);
     MoveWindow(g_buttons[1], left + column + p(12), p(225), content - column - p(12), p(82), TRUE);
     MoveWindow(g_buttons[3], p(14), p(102), p(161), p(45), TRUE);
     MoveWindow(g_buttons[4], p(14), p(151), p(161), p(45), TRUE);
+    MoveWindow(g_buttons[5], left, p(331), p(203), p(39), TRUE);
+    MoveWindow(g_buttons[6], left + p(215), p(331), p(190), p(39), TRUE);
+    MoveWindow(g_buttons[7], left + content - p(159), p(266), p(75), p(34), TRUE);
+    MoveWindow(g_buttons[8], left + content - p(79), p(266), p(79), p(34), TRUE);
     for (int i = 0; i < 3; ++i) ShowWindow(g_buttons[i], g_audioPage ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_buttons[5], g_audioPage ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_buttons[6], g_audioPage && !audio::ExtraOutputs().empty() ? SW_SHOW : SW_HIDE);
+    for (int i = 7; i <= 8; ++i) ShowWindow(g_buttons[i], !g_audioPage && !g_rows.empty() ? SW_SHOW : SW_HIDE);
     SendMessageW(g_list, LB_SETITEMHEIGHT, 0, p(50));
     MoveWindow(g_list, left, p(96), content, p(150), TRUE);
     ShowWindow(g_list, !g_audioPage && !g_rows.empty() ? SW_SHOW : SW_HIDE);
@@ -78,7 +90,7 @@ void PaintPanel(HWND window, HDC dc) {
     Scale p{GetDpiForWindow(window)};
     RECT r{};
     GetClientRect(window, &r);
-    const long left = p(218), right = r.right - p(30);
+    const long left = p(218), right = left + ContentWidth(r, p);
     Fill(dc, r, kBackground);
     Fill(dc, {0, 0, p(189), r.bottom}, kSidebar);
     Fill(dc, {p(188), 0, p(189), r.bottom}, kLine);
@@ -99,8 +111,8 @@ void PaintPanel(HWND window, HDC dc) {
         Rounded(dc, dot, p(8), output ? kAccent : kQuiet);
         Text(dc, {left + p(40), p(141), right - p(20), p(179)},
              output ? output->name : L"Нет активного выхода", kInk, main.handle);
-        Text(dc, {left, p(327), right, p(350)},
-             L"Клик по значку в трее переключает между этими выходами.", kQuiet, small.handle);
+        Text(dc, {left, p(387), right, p(410)},
+             L"Значок рядом с часами переключает доступные выходы по кругу.", kQuiet, small.handle);
         return;
     }
 
@@ -110,8 +122,9 @@ void PaintPanel(HWND window, HDC dc) {
     }
     const auto index = (int)SendMessageW(g_list, LB_GETCURSEL, 0, 0);
     if (index < 0 || index >= (int)g_rows.size()) return;
-    Text(dc, {left, p(265), right, p(301)}, L"История за 7 дней", kInk, main.handle);
-    history::Paint(window, dc, {left, p(307), right, r.bottom - p(26)}, g_rows[index].device);
+    Text(dc, {left, p(265), right - p(170), p(301)}, L"История заряда", kInk, main.handle);
+    history::Paint(window, dc, {left, p(312), right, (std::min)(r.bottom - p(26), (long)p(596))},
+                   g_rows[index].device, g_oneDay);
 }
 
 void DrawButton(const DRAWITEMSTRUCT& item) {
@@ -134,16 +147,20 @@ void DrawButton(const DRAWITEMSTRUCT& item) {
         return;
     }
     const int slot = item.CtlID == Speakers ? 0 : 1;
-    const bool configure = item.CtlID == Configure;
-    const auto* endpoint = configure ? nullptr : audio::Find(audio::Configured(slot));
-    const bool unavailable = !configure && (!endpoint || !endpoint->available);
-    const bool selected = endpoint && endpoint->id == audio::Current();
+    const bool output = item.CtlID == Speakers || item.CtlID == Headphones;
+    const auto* endpoint = output ? audio::Find(audio::Configured(slot)) : nullptr;
+    const bool unavailable = output && (!endpoint || !endpoint->available);
+    const bool selected = (endpoint && endpoint->id == audio::Current()) ||
+                          (item.CtlID == Day && g_oneDay) || (item.CtlID == Week && !g_oneDay);
     Fill(item.hDC, r, kBackground);
-    Rounded(item.hDC, r, p(13), selected ? kAccent : kLine);
+    Rounded(item.hDC, r, p(13), selected || item.CtlID == Add ? kAccent : kLine);
     InflateRect(&r, -p(1), -p(1));
-    Rounded(item.hDC, r, p(12), item.itemState & ODS_SELECTED ? kLine : kSurface);
-    if (configure) {
-        Text(item.hDC, r, L"Настроить выходы", kInk, label.handle, DT_CENTER);
+    Rounded(item.hDC, r, p(12), item.CtlID == Add ? kAccent : item.itemState & ODS_SELECTED ? kLine : kSurface);
+    if (!output) {
+        wchar_t caption[96]{};
+        GetWindowTextW(item.hwndItem, caption, ARRAYSIZE(caption));
+        Text(item.hDC, r, caption, item.CtlID == Add ? kBackground : selected ? kAccent : kInk,
+             item.CtlID == Day || item.CtlID == Week ? sub.handle : label.handle, DT_CENTER);
     } else {
         RECT title{r.left + p(16), r.top + p(13), r.right - p(14), r.top + p(40)};
         RECT detail{title.left, r.top + p(39), title.right, r.bottom - p(10)};
@@ -169,16 +186,16 @@ void DrawBattery(const DRAWITEMSTRUCT& item) {
     Font main(p(14), FW_SEMIBOLD, L"Inter");
     Font small(p(12), FW_NORMAL, L"Inter");
     Font number(p(19), FW_NORMAL, L"Consolas");
-    const int meter = r.right - p(155);
+    const int meter = r.right - p(178);
     if (selected) Fill(item.hDC, {r.left, r.top + p(9), r.left + p(2), r.bottom - p(9)}, kAccent);
     Text(item.hDC, {r.left + p(13), r.top + p(4), meter - p(12), r.top + p(26)}, row.device.name, kInk, main.handle);
     Text(item.hDC, {r.left + p(13), r.top + p(24), meter - p(12), r.bottom - p(5)}, row.detail, kQuiet, small.handle);
     COLORREF color = row.low ? kAmber : row.charging ? kAccent : kInk;
-    RECT bar{meter, r.top + p(25), r.right - p(67), r.top + p(28)};
-    Fill(item.hDC, bar, kLine);
+    RECT bar{meter, r.top + p(24), r.right - p(67), r.top + p(29)};
+    Rounded(item.hDC, bar, p(5), kLine);
     if (row.percent >= 0) {
         bar.right = bar.left + (bar.right - bar.left) * row.percent / 100;
-        Fill(item.hDC, bar, color);
+        Rounded(item.hDC, bar, p(5), row.low ? kAmber : kAccent);
     }
     Text(item.hDC, {r.right - p(62), r.top, r.right - p(10), r.bottom}, row.value, color, number.handle, DT_RIGHT);
     if (item.itemState & ODS_FOCUS) {
@@ -192,10 +209,11 @@ LRESULT CALLBACK PanelProc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_CREATE: {
             HINSTANCE inst = (HINSTANCE)GetWindowLongPtrW(window, GWLP_HINSTANCE);
-            const wchar_t* labels[]{kSpeakers, kHeadphones, L"Настроить выходы", L"Зарядка", L"Переключение"};
+            const wchar_t* labels[]{kSpeakers, kHeadphones, L"Настроить выходы", L"Зарядка", L"Переключение",
+                                    L"+ Добавить устройство", L"Другие выходы ▾", L"24 часа", L"7 дней"};
             for (UINT i = 0; i < ARRAYSIZE(g_buttons); ++i)
                 g_buttons[i] = CreateWindowW(L"BUTTON", labels[i], WS_CHILD | WS_TABSTOP | BS_OWNERDRAW |
-                                             (i >= 3 ? WS_VISIBLE : 0),
+                                             (i == 3 || i == 4 ? WS_VISIBLE : 0),
                                              0, 0, 0, 0, window, (HMENU)(UINT_PTR)(Speakers + i), inst, nullptr);
             g_list = CreateWindowW(L"LISTBOX", L"Заряд устройств", WS_CHILD | WS_TABSTOP | WS_VSCROLL |
                                    LBS_NOINTEGRALHEIGHT | LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
@@ -222,6 +240,8 @@ LRESULT CALLBACK PanelProc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_COMMAND: {
             const auto id = LOWORD(wp);
             if (id == Configure) PostMessageW(g_owner, g_message, panel::ConfigureOutput, 0);
+            if (id == Add || id == Extras) PostMessageW(g_owner, g_message,
+                                                        id == Add ? panel::AddOutput : panel::ShowExtras, 0);
             if (id == Speakers || id == Headphones) PostMessageW(g_owner, g_message, panel::SelectOutput, id - Speakers);
             if (id == BatteryPage || id == AudioPage) {
                 g_audioPage = id == AudioPage;
@@ -231,6 +251,12 @@ LRESULT CALLBACK PanelProc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
             }
             if (id == BatteryPage || id == AudioPage || (id == Batteries && HIWORD(wp) == LBN_SELCHANGE))
                 InvalidateRect(window, nullptr, FALSE);
+            if (id == Day || id == Week) {
+                g_oneDay = id == Day;
+                InvalidateRect(g_buttons[7], nullptr, FALSE);
+                InvalidateRect(g_buttons[8], nullptr, FALSE);
+                InvalidateRect(window, nullptr, FALSE);
+            }
             return 0;
         }
         case WM_DRAWITEM: {
@@ -328,6 +354,7 @@ void Show(HWND owner, UINT message) {
 
 void UpdateAudio() {
     if (!g_panel) return;
+    Layout(g_panel);
     InvalidateRect(g_panel, nullptr, FALSE);
     for (HWND button : g_buttons) InvalidateRect(button, nullptr, FALSE);
 }
@@ -351,6 +378,7 @@ void SetBatteries(std::vector<BatteryRow> rows) {
     if (top >= 0 && top < (int)g_rows.size()) SendMessageW(g_list, LB_SETTOPINDEX, top, 0);
     SendMessageW(g_list, WM_SETREDRAW, TRUE, 0);
     ShowWindow(g_list, g_audioPage || g_rows.empty() ? SW_HIDE : SW_SHOW);
+    for (int i = 7; i <= 8; ++i) ShowWindow(g_buttons[i], !g_audioPage && !g_rows.empty() ? SW_SHOW : SW_HIDE);
     InvalidateRect(g_list, nullptr, TRUE);
     InvalidateRect(g_panel, nullptr, FALSE);
 }

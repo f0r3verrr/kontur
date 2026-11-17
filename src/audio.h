@@ -19,5 +19,8 @@ const std::wstring& Current();
 const std::wstring& Configured(int slot);
 const Endpoint* Find(const std::wstring& id);
 bool Assign(int slot, const std::wstring& id);
-std::wstring SwitchTo(int slot);  // Empty on success, localized error otherwise.
+const std::vector<std::wstring>& ExtraOutputs();
+bool SaveExtra(const std::wstring& id, bool include);
+std::vector<std::wstring> Cycle();
+std::wstring SwitchTo(const std::wstring& id);  // Empty on success, localized error otherwise.
 }

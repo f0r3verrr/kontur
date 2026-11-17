@@ -9,6 +9,6 @@ void UsbDisconnected(const std::wstring& key);
 int LastPercent(const std::wstring& key);
 std::wstring LastReadingAge(const std::wstring& key);
 std::wstring ChargeSummary(const DeviceStatus& device, bool russian = false);
-void Paint(HWND window, HDC dc, const RECT& bounds, const DeviceStatus& device);
+void Paint(HWND window, HDC dc, const RECT& bounds, const DeviceStatus& device, bool oneDay = false);
 void Show(HWND owner, const DeviceStatus& device);
 }

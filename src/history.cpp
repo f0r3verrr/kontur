@@ -75,7 +75,7 @@ std::wstring Ago(int64_t timestamp, bool russian = false) {
     return std::to_wstring(minutes / 1440) + (russian ? L" дн. назад" : L" d ago");
 }
 
-void PaintChart(HWND window, HDC dc, const RECT& bounds, const DeviceStatus& device) {
+void PaintChart(HWND window, HDC dc, const RECT& bounds, const DeviceStatus& device, bool oneDay) {
     using namespace appearance;
     const int saved = SaveDC(dc);
     IntersectClipRect(dc, bounds.left, bounds.top, bounds.right, bounds.bottom);
@@ -109,22 +109,23 @@ void PaintChart(HWND window, HDC dc, const RECT& bounds, const DeviceStatus& dev
             MoveToEx(dc, left, y, nullptr);
             LineTo(dc, right, y);
         }
-        for (int day = 0; day <= 7; ++day) {
-            const int x = left + (right - left) * day / 7;
-            MoveToEx(dc, x, top, nullptr);
-            LineTo(dc, x, bottom);
-            label(x - px(10), bottom + px(8), day == 7 ? L"Сейчас" : std::to_wstring(7 - day) + L" д");
+        const int ticks = oneDay ? 4 : 7;
+        for (int tick = 0; tick <= ticks; ++tick) {
+            const int x = left + (right - left) * tick / ticks;
+            label(x - px(10), bottom + px(8), tick == ticks ? L"Сейчас" :
+                  std::to_wstring((ticks - tick) * (oneDay ? 6 : 1)) + (oneDay ? L" ч" : L" д"));
         }
 
         HPEN trace = CreatePen(PS_SOLID, px(2), kAccent);
         SelectObject(dc, trace);
         const auto now = Now();
+        const auto range = oneDay ? kDay : kWeek;
         Reading previous{};
         int lastX = 0, lastY = 0;
         for (const auto& sample : Load(device.key).readings) {
-            if (sample.time < now - kWeek || sample.time > now || sample.percent < 0 || sample.percent > 100)
+            if (sample.time < now - range || sample.time > now || sample.percent < 0 || sample.percent > 100)
                 continue;
-            const int x = left + (int)((sample.time - (now - kWeek)) * (right - left) / kWeek);
+            const int x = left + (int)((sample.time - (now - range)) * (right - left) / range);
             const int y = bottom - (int)((bottom - top) * sample.percent / 100);
             if (previous.time && sample.time - previous.time <= kSampleInterval * 4 / 3) {
                 MoveToEx(dc, lastX, lastY, nullptr);
@@ -138,6 +139,12 @@ void PaintChart(HWND window, HDC dc, const RECT& bounds, const DeviceStatus& dev
             previous = sample;
         }
         if (!previous.time) label(left + px(12), top + px(14), L"Пока нет замеров заряда");
+        else {
+            SetDCBrushColor(dc, kAccent);
+            HGDIOBJ brush = SelectObject(dc, GetStockObject(DC_BRUSH));
+            Ellipse(dc, lastX - px(3), lastY - px(3), lastX + px(4), lastY + px(4));
+            SelectObject(dc, brush);
+        }
         SelectObject(dc, oldPen);
         DeleteObject(trace);
         DeleteObject(grid);
@@ -154,7 +161,7 @@ LRESULT CALLBACK HistoryProc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
             HDC dc = BeginPaint(window, &paint);
             RECT bounds{};
             GetClientRect(window, &bounds);
-            PaintChart(window, dc, bounds, g_selected);
+            PaintChart(window, dc, bounds, g_selected, false);
             EndPaint(window, &paint);
             return 0;
         }
@@ -176,8 +183,8 @@ LRESULT CALLBACK HistoryProc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
 
 namespace history {
 
-void Paint(HWND window, HDC dc, const RECT& bounds, const DeviceStatus& device) {
-    PaintChart(window, dc, bounds, device);
+void Paint(HWND window, HDC dc, const RECT& bounds, const DeviceStatus& device, bool oneDay) {
+    PaintChart(window, dc, bounds, device, oneDay);
 }
 
 void Observe(const DeviceStatus& device) {
