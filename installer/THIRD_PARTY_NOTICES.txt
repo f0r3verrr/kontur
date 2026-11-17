@@ -26,3 +26,17 @@ The wheel also supplies the GNU C++ runtime (GCC Runtime Library Exception) and 
 vosk-model-small-ru-0.22, Apache 2.0:
   https://alphacephei.com/vosk/models
   SHA-256 961d5ff98a17f4aa6de69864d0aa71fa5bac682301d2b5d17a3f24c5c99a46d4
+
+Piper 2023.11.14-2, unmodified Windows x64 release binaries and data:
+  https://github.com/rhasspy/piper/releases/tag/2023.11.14-2
+  Archive SHA-256 f3c58906402b24f3a96d92145f58acba6d86c9b5db896d207f78dc80811efcea
+  Source: https://github.com/rhasspy/piper/tree/2023.11.14-2
+  Bundled components: https://github.com/rhasspy/piper-phonemize
+  eSpeak NG: https://github.com/espeak-ng/espeak-ng
+  ONNX Runtime source: https://github.com/microsoft/onnxruntime/commit/c57cf37
+  License texts and notices are in voice/piper.
+
+Piper voice ru_RU-dmitri-medium, MIT model repository, CC0 dataset:
+  https://huggingface.co/rhasspy/piper-voices/tree/ae9d8352b73c1b1750748843e753a504b00e05b0/ru/ru_RU/dmitri/medium
+  Model SHA-256 f073356ebc4bd0f80c5af58df2953a5988bd5bdab1eb38635ce960b071fbefcb
+  See voice/piper/MODEL_CARD.

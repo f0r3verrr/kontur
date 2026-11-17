@@ -1,4 +1,5 @@
 #include "voice.h"
+#include "neural_reply.h"
 
 #include <mmsystem.h>
 #include <sapi.h>
@@ -299,8 +300,7 @@ void PreferRussian(ISpVoice* voice) {
     }
 }
 
-DWORD WINAPI Speak(LPVOID payload) {
-    std::unique_ptr<std::wstring> text(static_cast<std::wstring*>(payload));
+bool SpeakWithWindows(const std::wstring& text) {
     const HRESULT initialized = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     ISpVoice* speaker = nullptr;
     bool success = false;
@@ -309,7 +309,7 @@ DWORD WINAPI Speak(LPVOID payload) {
                                        __uuidof(ISpVoice), (void**)&speaker))) {
             PreferRussian(speaker);
             if (WaitForSingleObject(g_stop, 0) == WAIT_TIMEOUT &&
-                SUCCEEDED(speaker->Speak(text->c_str(), SPF_ASYNC | SPF_IS_NOT_XML, nullptr))) {
+                SUCCEEDED(speaker->Speak(text.c_str(), SPF_ASYNC | SPF_IS_NOT_XML, nullptr))) {
                 const auto deadline = GetTickCount64() + 12000;
                 HRESULT result;
                 do {
@@ -323,6 +323,14 @@ DWORD WINAPI Speak(LPVOID payload) {
         }
         CoUninitialize();
     }
+    return success;
+}
+
+DWORD WINAPI Speak(LPVOID payload) {
+    std::unique_ptr<std::wstring> text(static_cast<std::wstring*>(payload));
+    const auto neural = neural_reply::Speak(VoiceDirectory() + L"piper\\", Utf8(*text), g_stop);
+    const bool success = neural == neural_reply::Result::Played ||
+                         (neural == neural_reply::Result::Unavailable && SpeakWithWindows(*text));
     g_mutedUntil = GetTickCount64() + 500;
     g_speaking = false;
     if (!success && WaitForSingleObject(g_stop, 0) == WAIT_TIMEOUT) Report(voice::ReplyError);
@@ -356,6 +364,7 @@ void Stop() {
         CloseHandle(g_reply);
         g_reply = nullptr;
     }
+    neural_reply::ClearCache();
     if (g_stop) CloseHandle(g_stop);
     g_thread = g_stop = nullptr;
     g_running = false;

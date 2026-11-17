@@ -926,7 +926,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                         voice::Reply(g_voiceReplyText);
                     break;
                 case voice::ReplyError:
-                    AudioToast(L"Windows не смогла озвучить ответ");
+                    AudioToast(L"Не удалось озвучить ответ");
                     break;
                 case voice::MissingFiles:
                 case voice::MicrophoneError:

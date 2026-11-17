@@ -22,6 +22,8 @@ enum Control : UINT { Speakers = 100, Headphones, Configure, Add, Day, Week, Bat
                       BatteryPage = 200, AudioPage, VoicePage };
 HWND g_panel, g_owner, g_buttons[6], g_list, g_extraList, g_toast, g_settings, g_voiceToggle, g_listening;
 HWND g_replyToggle, g_replyEdit, g_replySave;
+HFONT g_replyFont;
+constexpr COLORREF kReplyInput = RGB(30, 29, 44);
 UINT g_message;
 size_t g_module;
 std::vector<HWND> g_navigation;
@@ -108,7 +110,7 @@ void Layout(HWND window) {
     MoveWindow(g_voiceToggle, left + content - p(156), top + p(96), p(134), p(38), TRUE);
     ShowWindow(g_voiceToggle, IsVoicePage() ? SW_SHOW : SW_HIDE);
     MoveWindow(g_replyToggle, left + content - p(156), top + p(186), p(134), p(34), TRUE);
-    MoveWindow(g_replyEdit, left + p(22), top + p(237), content - p(172), p(35), TRUE);
+    MoveWindow(g_replyEdit, left + p(34), top + p(245), content - p(199), p(21), TRUE);
     MoveWindow(g_replySave, left + content - p(139), top + p(235), p(117), p(38), TRUE);
     for (HWND control : {g_replyToggle, g_replyEdit, g_replySave})
         ShowWindow(control, IsVoicePage() ? SW_SHOW : SW_HIDE);
@@ -170,6 +172,10 @@ void PaintVoiceView(HWND, HDC dc, const ContentView& view) {
          g_voiceEnabled ? kAccent : kQuiet, body.handle);
     Rounded(dc, {left, top + p(174), right, top + p(290)}, p(16), kSurface);
     Text(dc, {x, top + p(186), edge - p(145), top + p(220)}, L"Голосовой ответ", kInk, title.handle);
+    RECT input{x, top + p(235), right - p(150), top + p(273)};
+    Rounded(dc, input, p(12), GetFocus() == g_replyEdit ? kAccent : kLine);
+    InflateRect(&input, -1, -1);
+    Rounded(dc, input, p(11), kReplyInput);
     Text(dc, {left, top + p(303), edge, top + p(335)}, L"Команды для звука", kInk, label.handle);
     Fill(dc, {left, top + p(341), right, top + p(342)}, kLine);
     Text(dc, {left + p(4), top + p(345), edge, top + p(380)}, L"Контур, переключи звук на колонки", kInk, body.handle);
@@ -243,7 +249,8 @@ void DrawButton(const DRAWITEMSTRUCT& item) {
     const bool unavailable = output && (!endpoint || !endpoint->available);
     const bool selected = (endpoint && endpoint->id == audio::Current()) ||
                           (item.CtlID == Day && g_oneDay) || (item.CtlID == Week && !g_oneDay);
-    Fill(item.hDC, r, kBackground);
+    const bool insideCard = item.CtlID == VoiceToggle || item.CtlID == ReplyToggle || item.CtlID == ReplySave;
+    Fill(item.hDC, r, insideCard ? kSurface : kBackground);
     Rounded(item.hDC, r, p(13), selected || item.CtlID == Add ? kAccent : kLine);
     InflateRect(&r, -p(1), -p(1));
     const bool disabled = (item.itemState & ODS_DISABLED) != 0;
@@ -314,6 +321,15 @@ void DrawExtra(const DRAWITEMSTRUCT& item) {
     FocusAccent(item, r, p);
 }
 
+void SetReplyFont(HWND window) {
+    HFONT previous = g_replyFont;
+    const Scale p{GetDpiForWindow(window)};
+    g_replyFont = CreateFontW(-p(15), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                              0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+    SendMessageW(g_replyEdit, WM_SETFONT, (WPARAM)g_replyFont, TRUE);
+    if (previous) DeleteObject(previous);
+}
+
 LRESULT CALLBACK PanelProc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_CREATE: {
@@ -333,10 +349,11 @@ LRESULT CALLBACK PanelProc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
                 WS_CHILD | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 0, 0, window, (HMENU)(UINT_PTR)VoiceToggle, inst, nullptr);
             g_replyToggle = CreateWindowW(L"BUTTON", g_replyEnabled ? L"Звук включён" : L"Звук выключен",
                 WS_CHILD | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 0, 0, window, (HMENU)(UINT_PTR)ReplyToggle, inst, nullptr);
-            g_replyEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_replyText.c_str(),
+            g_replyEdit = CreateWindowExW(0, L"EDIT", g_replyText.c_str(),
                 WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0, 0, 0, window, (HMENU)(UINT_PTR)ReplyEdit, inst, nullptr);
             SendMessageW(g_replyEdit, EM_LIMITTEXT, 120, 0);
-            SendMessageW(g_replyEdit, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), FALSE);
+            SendMessageW(g_replyEdit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
+            SetReplyFont(window);
             g_replySave = CreateWindowW(L"BUTTON", L"Сохранить", WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
                 0, 0, 0, 0, window, (HMENU)(UINT_PTR)ReplySave, inst, nullptr);
             Layout(window);
@@ -355,6 +372,7 @@ LRESULT CALLBACK PanelProc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_DPICHANGED: {
             const auto& r = *reinterpret_cast<RECT*>(lp);
             SetWindowPos(window, nullptr, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
+            SetReplyFont(window);
             Layout(window);
             return 0;
         }
@@ -365,6 +383,8 @@ LRESULT CALLBACK PanelProc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
             if (id == VoiceToggle) PostMessageW(g_owner, g_message, panel::ToggleVoice, 0);
             if (id == ReplyToggle) PostMessageW(g_owner, g_message, panel::ToggleReply, 0);
             if (id == ReplySave) PostMessageW(g_owner, g_message, panel::SaveReply, 0);
+            if (id == ReplyEdit && (HIWORD(wp) == EN_SETFOCUS || HIWORD(wp) == EN_KILLFOCUS))
+                InvalidateRect(window, nullptr, FALSE);
             if (id == Extras && HIWORD(wp) == LBN_SELCHANGE) {
                 const auto index = SendMessageW(g_extraList, LB_GETCURSEL, 0, 0);
                 if (index != LB_ERR) SendMessageW(g_owner, g_message, panel::SelectExtra, index);
@@ -395,8 +415,13 @@ LRESULT CALLBACK PanelProc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
             if (item.CtlID == Extras) DrawExtra(item);
             return TRUE;
         }
-        case WM_CTLCOLORLISTBOX:
         case WM_CTLCOLOREDIT: {
+            static HBRUSH replyBackground = CreateSolidBrush(kReplyInput);
+            SetBkColor((HDC)wp, kReplyInput);
+            SetTextColor((HDC)wp, kInk);
+            return (LRESULT)replyBackground;
+        }
+        case WM_CTLCOLORLISTBOX: {
             static HBRUSH brush = CreateSolidBrush(kBackground);
             SetBkColor((HDC)wp, kBackground);
             SetTextColor((HDC)wp, kInk);
@@ -415,6 +440,8 @@ LRESULT CALLBACK PanelProc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
             g_extraList = nullptr;
             g_voiceToggle = nullptr;
             g_replyToggle = g_replyEdit = g_replySave = nullptr;
+            if (g_replyFont) DeleteObject(g_replyFont);
+            g_replyFont = nullptr;
             g_extraIds.clear();
             g_navigation.clear();
             g_rows.clear();
