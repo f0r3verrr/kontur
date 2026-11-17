@@ -1,4 +1,4 @@
-Wireless Battery bundles the following third-party software.
+Kontur bundles the following third-party software.
 
 HeadsetControl 4.3.0 (headsetcontrol.exe)
   Copyright (C) the HeadsetControl contributors
@@ -6,8 +6,23 @@ HeadsetControl 4.3.0 (headsetcontrol.exe)
   License: GNU General Public License v3.0 (same text as LICENSE.txt)
   Corresponding source code:
     https://github.com/Sapd/HeadsetControl/releases/tag/4.3.0
-    (headsetcontrol-4.3.0.tar.gz is also attached to every Wireless Battery release)
 
   The binary is the unmodified official release asset
   headsetcontrol-windows-x86_64.exe,
   SHA-256 e371da043710ddb8fc70af77f2ccad1cd03f8c6f49ba423e08764ad7a94a3c40.
+
+Optional voice package
+
+Vosk 0.3.45 and its Windows runtime DLLs were taken unmodified from the Windows x64 wheel:
+  https://pypi.org/project/vosk/0.3.45/#files
+  SHA-256 6994ddc68556c7e5730c3b6f6bad13320e3519b13ce3ed2aa25a86724e7c10ac
+Vosk source and Apache 2.0 license:
+  https://github.com/alphacep/vosk-api/tree/v0.3.45
+  See voice/LICENSE-VOSK.txt.
+The wheel also supplies the GNU C++ runtime (GCC Runtime Library Exception) and MinGW-w64 winpthreads:
+  https://gcc.gnu.org/onlinedocs/libstdc++/manual/license.html
+  https://www.mingw-w64.org/
+
+vosk-model-small-ru-0.22, Apache 2.0:
+  https://alphacephei.com/vosk/models
+  SHA-256 961d5ff98a17f4aa6de69864d0aa71fa5bac682301d2b5d17a3f24c5c99a46d4

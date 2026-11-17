@@ -1,0 +1,293 @@
+#include "voice.h"
+
+#include <mmsystem.h>
+#include <array>
+#include <atomic>
+#include <deque>
+#include <memory>
+#include <string>
+
+namespace {
+constexpr int kRate = 16000;
+constexpr int kSamples = kRate / 10;
+constexpr int kPreRoll = 12;
+constexpr ULONGLONG kCommandTime = 5000;
+constexpr char kWake[] = u8"контур";
+// Alternative phrases are negative examples. With only one real word in the grammar,
+// a speech decoder may force unrelated audio to that word.
+constexpr char kWakeGrammar[] = u8R"(["контур","переключи звук на колонки","переключи звук на наушники","переключи на колонки","переключи на наушники","который","конкурс","контроль","контора","[unk]"])";
+constexpr char kCommands[] = u8R"(["контур переключи звук на колонки","контур переключи звук на наушники","контур переключи на колонки","контур переключи на наушники","переключи звук на колонки","переключи звук на наушники","переключи на колонки","переключи на наушники","[unk]"])";
+
+using Samples = std::array<short, kSamples>;
+HANDLE g_stop, g_thread;
+HWND g_owner;
+UINT g_message;
+LPARAM g_session;
+std::atomic<bool> g_running;
+
+void Report(voice::Event event) { PostMessageW(g_owner, g_message, event, g_session); }
+
+std::string JsonText(const char* json, const char* key) {
+    if (!json) return {};
+    const std::string value(json);
+    const auto field = value.find(key);
+    if (field == std::string::npos) return {};
+    const auto colon = value.find(':', field);
+    if (colon == std::string::npos) return {};
+    const auto begin = value.find('"', colon);
+    if (begin == std::string::npos) return {};
+    const auto end = value.find('"', begin + 1);
+    return end == std::string::npos ? std::string{} : value.substr(begin + 1, end - begin - 1);
+}
+
+voice::Event ParseCommand(std::string text) {
+    constexpr char prefix[] = u8"контур ";
+    if (text.compare(0, sizeof(prefix) - 1, prefix) == 0) text.erase(0, sizeof(prefix) - 1);
+    if (text == u8"переключи звук на колонки" || text == u8"переключи на колонки") return voice::Speakers;
+    if (text == u8"переключи звук на наушники" || text == u8"переключи на наушники") return voice::Headphones;
+    return voice::EngineError;
+}
+
+struct Engine {
+    HMODULE dll = nullptr;
+    void* (*modelNew)(const char*) = nullptr;
+    void (*modelFree)(void*) = nullptr;
+    void* (*recognizerNew)(void*, float, const char*) = nullptr;
+    void (*recognizerFree)(void*) = nullptr;
+    int (*accept)(void*, const char*, int) = nullptr;
+    const char* (*result)(void*) = nullptr;
+    const char* (*partial)(void*) = nullptr;
+    const char* (*finalResult)(void*) = nullptr;
+    void (*reset)(void*) = nullptr;
+    void (*logLevel)(int) = nullptr;
+
+    template<class T> bool Load(T& fn, const char* name) {
+        fn = reinterpret_cast<T>(GetProcAddress(dll, name));
+        return fn != nullptr;
+    }
+    bool Open(const std::wstring& path) {
+        dll = LoadLibraryExW(path.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+        return dll && Load(modelNew, "vosk_model_new") && Load(modelFree, "vosk_model_free") &&
+               Load(recognizerNew, "vosk_recognizer_new_grm") && Load(recognizerFree, "vosk_recognizer_free") &&
+               Load(accept, "vosk_recognizer_accept_waveform") && Load(result, "vosk_recognizer_result") &&
+               Load(partial, "vosk_recognizer_partial_result") && Load(finalResult, "vosk_recognizer_final_result") &&
+               Load(reset, "vosk_recognizer_reset") && Load(logLevel, "vosk_set_log_level");
+    }
+    ~Engine() { if (dll) FreeLibrary(dll); }
+};
+
+std::wstring VoiceDirectory() {
+    wchar_t path[32768]{};
+    DWORD n = GetModuleFileNameW(nullptr, path, ARRAYSIZE(path));
+    if (!n || n >= ARRAYSIZE(path)) return {};
+    const std::wstring exe(path, n);
+    return exe.substr(0, exe.find_last_of(L"\\/") + 1) + L"voice\\";
+}
+
+std::string Utf8(const std::wstring& text) {
+    const auto count = WideCharToMultiByte(CP_UTF8, 0, text.data(), (int)text.size(), nullptr, 0, nullptr, nullptr);
+    std::string result(count, '\0');
+    if (count) WideCharToMultiByte(CP_UTF8, 0, text.data(), (int)text.size(), result.data(), count, nullptr, nullptr);
+    return result;
+}
+
+struct Capture {
+    HANDLE ready = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    HWAVEIN mic = nullptr;
+    std::array<Samples, 4> samples{};
+    std::array<WAVEHDR, 4> headers{};
+    size_t prepared = 0;
+
+    bool Open() {
+        WAVEFORMATEX format{WAVE_FORMAT_PCM, 1, kRate, kRate * 2, 2, 16, 0};
+        if (!ready || waveInOpen(&mic, WAVE_MAPPER, &format, (DWORD_PTR)ready, 0, CALLBACK_EVENT) != MMSYSERR_NOERROR)
+            return false;
+        for (size_t i = 0; i < headers.size(); ++i) {
+            auto& hdr = headers[i];
+            hdr.lpData = reinterpret_cast<char*>(samples[i].data());
+            hdr.dwBufferLength = sizeof(Samples);
+            if (waveInPrepareHeader(mic, &hdr, sizeof(hdr)) != MMSYSERR_NOERROR) return false;
+            ++prepared;
+            if (waveInAddBuffer(mic, &hdr, sizeof(hdr)) != MMSYSERR_NOERROR) return false;
+        }
+        return waveInStart(mic) == MMSYSERR_NOERROR;
+    }
+    ~Capture() {
+        if (mic) {
+            waveInReset(mic);
+            for (size_t i = 0; i < prepared; ++i) waveInUnprepareHeader(mic, &headers[i], sizeof(WAVEHDR));
+            waveInClose(mic);
+        }
+        for (auto& data : samples) SecureZeroMemory(data.data(), sizeof(data));
+        if (ready) CloseHandle(ready);
+    }
+};
+
+struct Decoder {
+    using Recognizer = std::unique_ptr<void, decltype(Engine::recognizerFree)>;
+    struct Block { Samples samples; int bytes; };
+    Engine& engine;
+    void* model;
+    void (*report)(voice::Event);
+    Recognizer wake, command;
+    std::deque<Block> recent;
+    ULONGLONG deadline = 0;
+    ULONGLONG audibleUntil = 0;
+    int consecutive = 0;
+
+    Decoder(Engine& api, void* loadedModel, void (*notify)(voice::Event))
+        : engine(api), model(loadedModel), report(notify),
+          wake(api.recognizerNew(model, kRate, kWakeGrammar), api.recognizerFree),
+          command(nullptr, api.recognizerFree) {}
+    ~Decoder() { Clear(); }
+
+    void Clear() {
+        for (auto& block : recent) SecureZeroMemory(block.samples.data(), sizeof(Samples));
+        recent.clear();
+    }
+
+    bool Submit(const char* json, bool replay = false) {
+        auto text = JsonText(json, "\"text\"");
+        if (replay && text.rfind(u8"контур ", 0) != 0) return false;
+        const auto event = ParseCommand(std::move(text));
+        if (event == voice::EngineError) return false;
+        report(event);
+        return true;
+    }
+
+    void Finish() {
+        command.reset();
+        Clear();
+        engine.reset(wake.get());
+    }
+
+    void Tick(ULONGLONG now) {
+        if (command && now >= deadline) {
+            Submit(engine.finalResult(command.get()));
+            Finish();
+        }
+    }
+
+    bool Feed(const Samples& samples, int bytes, ULONGLONG now) {
+        const auto data = reinterpret_cast<const char*>(samples.data());
+        if (command) {
+            if (engine.accept(command.get(), data, bytes) > 0 && Submit(engine.result(command.get()))) Finish();
+            return true;
+        }
+        for (int i = 0; i < bytes / (int)sizeof(short); ++i) {
+            if (samples[i] < -120 || samples[i] > 120) {
+                audibleUntil = now + 800;
+                break;
+            }
+        }
+        if (now >= audibleUntil) {
+            if (!recent.empty()) Finish();
+            consecutive = 0;
+            return true;
+        }
+        if (recent.size() == kPreRoll) {
+            SecureZeroMemory(recent.front().samples.data(), sizeof(Samples));
+            recent.pop_front();
+        }
+        recent.push_back({samples, bytes});
+        const bool ended = engine.accept(wake.get(), data, bytes) > 0;
+        const auto text = ended ? JsonText(engine.result(wake.get()), "\"text\"") :
+                                  JsonText(engine.partial(wake.get()), "\"partial\"");
+        consecutive = text == kWake ? consecutive + 1 : 0;
+        if (text != kWake || (!ended && consecutive < 2)) return true;
+        consecutive = 0;
+        command.reset(engine.recognizerNew(model, kRate, kCommands));
+        if (!command) return false;
+        deadline = now + kCommandTime;
+        report(voice::Wake);
+        bool complete = false;
+        for (const auto& block : recent) {
+            if (engine.accept(command.get(), reinterpret_cast<const char*>(block.samples.data()), block.bytes) > 0 &&
+                Submit(engine.result(command.get()), true)) {
+                complete = true;
+                break;
+            }
+        }
+        Clear();
+        if (complete) Finish();
+        return true;
+    }
+};
+
+voice::Event Listen() {
+    const auto dir = VoiceDirectory();
+    const auto dllPath = dir + L"libvosk.dll", modelPath = dir + L"model";
+    if (dir.empty() || GetFileAttributesW(dllPath.c_str()) == INVALID_FILE_ATTRIBUTES ||
+        GetFileAttributesW((modelPath + L"\\am\\final.mdl").c_str()) == INVALID_FILE_ATTRIBUTES)
+        return voice::MissingFiles;
+    Engine engine;
+    if (!engine.Open(dllPath)) return voice::EngineError;
+    engine.logLevel(-1);
+    wchar_t shortPath[32768]{};
+    DWORD shortLength = GetShortPathNameW(modelPath.c_str(), shortPath, ARRAYSIZE(shortPath));
+    const auto modelString = Utf8(shortLength && shortLength < ARRAYSIZE(shortPath) ? shortPath : modelPath);
+    std::unique_ptr<void, decltype(engine.modelFree)> model(engine.modelNew(modelString.c_str()), engine.modelFree);
+    if (!model) return voice::EngineError;
+    Decoder decoder(engine, model.get(), Report);
+    if (!decoder.wake) return voice::EngineError;
+    if (WaitForSingleObject(g_stop, 0) == WAIT_OBJECT_0) return voice::Ready;
+    Capture capture;
+    if (!capture.Open()) return voice::MicrophoneError;
+    Report(voice::Ready);
+    size_t next = 0;
+    HANDLE events[]{g_stop, capture.ready};
+    for (;;) {
+        const auto wait = WaitForMultipleObjects(2, events, FALSE, decoder.command ? 100 : INFINITE);
+        if (wait == WAIT_OBJECT_0) return voice::Ready;
+        if (wait == WAIT_FAILED) return voice::MicrophoneError;
+        decoder.Tick(GetTickCount64());
+        while (capture.headers[next].dwFlags & WHDR_DONE) {
+            if (WaitForSingleObject(g_stop, 0) == WAIT_OBJECT_0) return voice::Ready;
+            auto& hdr = capture.headers[next];
+            const auto bytes = (int)hdr.dwBytesRecorded;
+            if (bytes && !decoder.Feed(capture.samples[next], bytes, GetTickCount64())) return voice::EngineError;
+            SecureZeroMemory(hdr.lpData, hdr.dwBufferLength);
+            if (waveInAddBuffer(capture.mic, &hdr, sizeof(hdr)) != MMSYSERR_NOERROR) return voice::MicrophoneError;
+            next = (next + 1) % capture.headers.size();
+        }
+    }
+}
+
+DWORD WINAPI Worker(LPVOID) {
+    const auto event = Listen();
+    g_running = false;
+    if (event != voice::Ready && WaitForSingleObject(g_stop, 0) == WAIT_TIMEOUT) Report(event);
+    return 0;
+}
+} // namespace
+
+namespace voice {
+bool Start(HWND owner, UINT message) {
+    if (g_running) return true;
+    Stop();
+    g_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!g_stop) return false;
+    g_owner = owner;
+    g_message = message;
+    ++g_session;
+    g_running = true;
+    g_thread = CreateThread(nullptr, 0, Worker, nullptr, 0, nullptr);
+    if (!g_thread) Stop();
+    return g_thread != nullptr;
+}
+
+void Stop() {
+    if (g_stop) SetEvent(g_stop);
+    if (g_thread) {
+        WaitForSingleObject(g_thread, INFINITE);
+        CloseHandle(g_thread);
+    }
+    if (g_stop) CloseHandle(g_stop);
+    g_thread = g_stop = nullptr;
+    g_running = false;
+    ++g_session;
+}
+
+bool Running() { return g_running; }
+bool CurrentEvent(LPARAM session) { return session == g_session; }
+}

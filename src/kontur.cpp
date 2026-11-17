@@ -15,6 +15,7 @@
 
 #include "devices.h"
 #include "battery_monitor.h"
+#include "voice.h"
 #include "audio.h"
 #include "history.h"
 #include "panel.h"
@@ -27,6 +28,7 @@ constexpr UINT WM_RESULTS = WM_APP + 2;
 constexpr UINT WM_WIDGET_CLICK = WM_APP + 3;
 constexpr UINT WM_AUDIO_CHANGED = WM_APP + 4;
 constexpr UINT WM_PANEL_ACTION = WM_APP + 5;
+constexpr UINT WM_VOICE = WM_APP + 7;
 constexpr UINT WM_SHOW_PANEL = WM_APP + 6;
 constexpr UINT_PTR TIMER_DEBOUNCE = 1;
 constexpr UINT_PTR TIMER_WIDGET = 2;
@@ -36,7 +38,7 @@ constexpr UINT AUDIO_ID = 0xFFFF;
 
 enum MenuId : UINT {
     ID_REFRESH = 100, ID_AUTOSTART, ID_HIDE_LAST_KNOWN, ID_WIDGET_BACKGROUND, ID_EXIT, ID_MODE_WIDGET, ID_MODE_TRAY, ID_SUPPORT,
-    ID_OPEN_PANEL, ID_CONFIGURE_AUDIO,
+    ID_OPEN_PANEL, ID_CONFIGURE_AUDIO, ID_VOICE,
     ID_DEVICE_FIRST = 1000
 };
 enum DeviceCmd : UINT { DEV_TOGGLE, DEV_LEFT, DEV_RIGHT, DEV_HISTORY, DEV_STRIDE };
@@ -571,6 +573,17 @@ void AudioToast(const std::wstring& text) {
     panel::Toast(g_hwnd, anchor, text);
 }
 
+void SetVoice(bool enabled) {
+    if (enabled && !voice::Start(g_hwnd, WM_VOICE)) {
+        AudioToast(L"Не удалось запустить голосовой режим");
+        enabled = false;
+    } else if (!enabled) {
+        voice::Stop();
+        AudioToast(L"Голосовой режим выключен · микрофон освобождён");
+    }
+    SaveBoolSetting(L"VoiceEnabled", enabled);
+}
+
 void SetAudioOutput(const std::wstring& id) {
     const auto error = audio::SwitchTo(id);
     UpdateAudioTray();
@@ -730,6 +743,7 @@ void ShowMenu() {
     HMENU m = CreatePopupMenu();
     AppendMenuW(m, MF_STRING, ID_OPEN_PANEL, L"Открыть Контур");
     AppendMenuW(m, MF_STRING, ID_CONFIGURE_AUDIO, L"Настроить звук");
+    AppendMenuW(m, MF_STRING | (voice::Running() ? MF_CHECKED : 0), ID_VOICE, L"Голосовые команды · Контур");
     SetMenuDefaultItem(m, ID_OPEN_PANEL, FALSE);
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     std::vector<std::wstring> keys;  // device index -> device key; menu id ID_DEVICE_FIRST + index * DEV_STRIDE + command
@@ -775,6 +789,7 @@ void ShowMenu() {
     switch (cmd) {
         case ID_OPEN_PANEL: OpenPanel(); break;
         case ID_CONFIGURE_AUDIO: ConfigureAudio(); break;
+        case ID_VOICE: SetVoice(!voice::Running()); break;
         case ID_REFRESH: battery_monitor::Refresh(); break;
         case ID_AUTOSTART: SetAutostart(!AutostartEnabled()); break;
         case ID_HIDE_LAST_KNOWN: SetHideLastKnown(!g_hideLastKnown); break;
@@ -860,6 +875,23 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 panel::UpdateAudio();
             }
             return 0;
+        case WM_VOICE:
+            if (!voice::CurrentEvent(lp)) return 0;
+            switch (wp) {
+                case voice::Ready: AudioToast(L"Голосовой режим включён · скажи «Контур»"); break;
+                case voice::Wake: AudioToast(L"Слушаю команду"); break;
+                case voice::Speakers: if (voice::Running()) SwitchAudio(0); break;
+                case voice::Headphones: if (voice::Running()) SwitchAudio(1); break;
+                case voice::MissingFiles:
+                case voice::MicrophoneError:
+                case voice::EngineError:
+                    SaveBoolSetting(L"VoiceEnabled", false);
+                    AudioToast(wp == voice::MissingFiles ? L"Папка voice должна лежать рядом с Kontur.exe" :
+                               wp == voice::MicrophoneError ? L"Не удалось открыть микрофон Windows" :
+                                                             L"Не удалось загрузить распознавание речи");
+                    break;
+            }
+            return 0;
         case WM_WIDGET_CLICK:
             OpenHistoryOrMenu((UINT)wp);
             return 0;
@@ -889,6 +921,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         case WM_DESTROY:
+            voice::Stop();
             audio::Stop();
             if (g_audioAdded) TrayDelete(AUDIO_ID);
             if (g_audioIcon) DestroyIcon(g_audioIcon);
@@ -1014,6 +1047,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     UpdatePlaceholder();  // something to click on until the first poll finishes
     audio::Start(g_hwnd, WM_AUDIO_CHANGED);
     UpdateAudioTray();
+    if (LoadBoolSetting(L"VoiceEnabled", false)) SetVoice(true);
     if (!background) OpenPanel();
     SetTimer(g_hwnd, TIMER_WIDGET, 1000, nullptr);
     battery_monitor::Start(g_hwnd, WM_RESULTS);

@@ -11,5 +11,5 @@ g++ -std=c++17 -Os -municode -mwindows -static -s -ffunction-sections -fdata-sec
     -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00 -Wall -Wno-missing-field-initializers ^
     !SOURCES! ^
     build\app_res.o -o Kontur.exe ^
-    -lhid -lsetupapi -lcfgmgr32 -lole32 -loleaut32 -lcomctl32 -lgdi32 -lgdiplus -lruntimeobject -lws2_32 || exit /b 1
+    -lhid -lsetupapi -lcfgmgr32 -lole32 -loleaut32 -lcomctl32 -lgdi32 -lgdiplus -lruntimeobject -lws2_32 -lwinmm || exit /b 1
 echo Built Kontur.exe
