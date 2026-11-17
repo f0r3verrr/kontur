@@ -412,6 +412,22 @@ HFONT g_settingsFont;
 bool g_adding;
 std::vector<std::wstring> g_optionIds;
 std::wstring g_settingsNotice;
+void SettingsLayout(HWND window);
+
+int OutputRows() { return (std::clamp)((int)g_optionIds.size(), 1, 4); }
+
+void ResizeAddDialog(HWND window) {
+    if (!g_adding || !window) return;
+    Scale p{GetDpiForWindow(window)};
+    RECT current{};
+    GetClientRect(window, &current);
+    RECT size{0, 0, current.right, p(131 + OutputRows() * 43)};
+    if (current.bottom == size.bottom) return;
+    AdjustWindowRectExForDpi(&size, GetWindowLongW(window, GWL_STYLE), FALSE,
+                             GetWindowLongW(window, GWL_EXSTYLE), p.dpi);
+    SetWindowPos(window, nullptr, 0, 0, size.right - size.left, size.bottom - size.top,
+                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
 
 bool IsExtra(const std::wstring& id) {
     const auto& extra = audio::ExtraOutputs();
@@ -463,6 +479,10 @@ void PopulateOutputSettings(const std::wstring& selected = {}) {
         SendMessageW(g_settingsList, LB_SETCURSEL, 0, 0);
     ShowWindow(g_settingsList, g_optionIds.empty() ? SW_HIDE : SW_SHOW);
     ShowSelectedOutput();
+    HWND window = GetParent(g_settingsList);
+    ResizeAddDialog(window);
+    SettingsLayout(window);
+    InvalidateRect(window, nullptr, FALSE);
     InvalidateRect(g_settingsList, nullptr, TRUE);
 }
 
@@ -472,15 +492,23 @@ void SettingsLayout(HWND window) {
     GetClientRect(window, &r);
     int w = r.right - p(44);
     SendMessageW(g_settingsList, LB_SETITEMHEIGHT, 0, p(43));
-    MoveWindow(g_settingsList, p(22), p(63), w, p(215), TRUE);
+    MoveWindow(g_settingsList, p(22), p(63), w, p(g_adding ? OutputRows() * 43 : 215), TRUE);
+    if (g_adding) {
+        const int footer = r.bottom - p(54);
+        MoveWindow(g_settingsButtons[3], r.right - p(153), footer, p(131), p(36), TRUE);
+        MoveWindow(g_settingsButtons[4], p(22), footer, p(208), p(36), TRUE);
+        ShowWindow(g_settingsName, SW_HIDE);
+        for (int i = 0; i < 3; ++i) ShowWindow(g_settingsButtons[i], SW_HIDE);
+        return;
+    }
     MoveWindow(g_settingsName, p(22), p(311), w - p(120), p(32), TRUE);
     MoveWindow(g_settingsButtons[0], r.right - p(131), p(307), p(109), p(39), TRUE);
     MoveWindow(g_settingsButtons[1], p(22), p(357), p(143), p(38), TRUE);
     MoveWindow(g_settingsButtons[2], p(174), p(357), p(143), p(38), TRUE);
     MoveWindow(g_settingsButtons[3], r.right - p(200), p(357), p(178), p(38), TRUE);
     MoveWindow(g_settingsButtons[4], p(22), p(410), p(208), p(34), TRUE);
-    ShowWindow(g_settingsName, g_adding ? SW_HIDE : SW_SHOW);
-    for (int i = 0; i < 3; ++i) ShowWindow(g_settingsButtons[i], g_adding ? SW_HIDE : SW_SHOW);
+    ShowWindow(g_settingsName, SW_SHOW);
+    for (int i = 0; i < 3; ++i) ShowWindow(g_settingsButtons[i], SW_SHOW);
 }
 
 void PaintSettingsItem(const DRAWITEMSTRUCT& item) {
@@ -585,7 +613,12 @@ LRESULT CALLBACK SettingsProc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
             if (g_optionIds.empty())
                 Text(dc, {p(28), p(64), r.right - p(22), p(108)}, L"Новых доступных выходов нет", kQuiet, small.handle);
             if (!g_adding) Text(dc, {p(22), p(281), r.right - p(22), p(307)}, L"Имя в Контуре", kQuiet, small.handle);
-            Text(dc, {p(242), p(410), r.right - p(22), p(444)}, g_settingsNotice, kQuiet, small.handle, DT_RIGHT);
+            if (!g_adding)
+                Text(dc, {p(242), p(410), r.right - p(22), p(444)}, g_settingsNotice, kQuiet, small.handle, DT_RIGHT);
+            else if (!g_settingsNotice.empty()) {
+                Text(dc, {p(22), r.bottom - p(68), r.right - p(22), r.bottom - p(54)},
+                     g_settingsNotice, kQuiet, small.handle);
+            }
             EndPaint(window, &paint);
             return 0;
         }
@@ -637,7 +670,7 @@ void ShowOutputSettings(bool adding) {
         Register(inst, cls, SettingsProc, g_brand);
         Scale p{GetDpiForWindow(g_panel)};
         constexpr DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
-        RECT size{0, 0, p(600), p(460)}, owner{};
+        RECT size{0, 0, p(adding ? 560 : 600), p(adding ? 174 : 460)}, owner{};
         AdjustWindowRectExForDpi(&size, style, FALSE, WS_EX_CONTROLPARENT, p.dpi);
         GetWindowRect(g_panel, &owner);
         const int w = size.right - size.left, h = size.bottom - size.top;
@@ -645,6 +678,11 @@ void ShowOutputSettings(bool adding) {
                                      (owner.left + owner.right - w) / 2, (owner.top + owner.bottom - h) / 2,
                                      w, h, g_panel, nullptr, inst, nullptr);
         if (!g_settings) return;
+        RECT actual{};
+        GetWindowRect(g_settings, &actual);
+        SetWindowPos(g_settings, nullptr, (owner.left + owner.right - (actual.right - actual.left)) / 2,
+                     (owner.top + owner.bottom - (actual.bottom - actual.top)) / 2,
+                     0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         DarkCaption(g_settings);
     } else PopulateOutputSettings(SelectedOutput());
     ShowWindow(g_settings, SW_SHOW);
