@@ -38,7 +38,7 @@ constexpr UINT AUDIO_ID = 0xFFFF;
 
 enum MenuId : UINT {
     ID_REFRESH = 100, ID_AUTOSTART, ID_HIDE_LAST_KNOWN, ID_WIDGET_BACKGROUND, ID_EXIT, ID_MODE_WIDGET, ID_MODE_TRAY, ID_SUPPORT,
-    ID_OPEN_PANEL, ID_CONFIGURE_AUDIO, ID_VOICE,
+    ID_OPEN_PANEL, ID_CONFIGURE_AUDIO,
     ID_DEVICE_FIRST = 1000
 };
 enum DeviceCmd : UINT { DEV_TOGGLE, DEV_LEFT, DEV_RIGHT, DEV_HISTORY, DEV_STRIDE };
@@ -574,22 +574,56 @@ void AudioToast(const std::wstring& text) {
 }
 
 void SetVoice(bool enabled) {
-    if (enabled && !voice::Start(g_hwnd, WM_VOICE)) {
-        AudioToast(L"Не удалось запустить голосовой режим");
-        enabled = false;
-    } else if (!enabled) {
+    if (!enabled) {
         voice::Stop();
-        AudioToast(L"Голосовой режим выключен · микрофон освобождён");
+        panel::HideListening();
+        panel::UpdateVoice(false, L"Выключены · микрофон свободен");
+    } else {
+        enabled = voice::Start(g_hwnd, WM_VOICE);
+        panel::UpdateVoice(enabled, enabled ? L"Запуск распознавания…" : L"Не удалось запустить");
     }
     SaveBoolSetting(L"VoiceEnabled", enabled);
 }
 
-void SetAudioOutput(const std::wstring& id) {
+bool g_voiceReply;
+std::wstring g_voiceReplyText;
+
+void LoadVoiceReply() {
+    g_voiceReply = LoadBoolSetting(L"VoiceReplyEnabled", true);
+    wchar_t text[121]{};
+    DWORD size = sizeof(text);
+    if (RegGetValueW(HKEY_CURRENT_USER, kSettingsKey, L"VoiceReplyText", RRF_RT_REG_SZ, nullptr,
+                     text, &size) == ERROR_SUCCESS && *text)
+        g_voiceReplyText = text;
+    else g_voiceReplyText = L"Команда выполнена";
+    panel::UpdateReply(g_voiceReply, g_voiceReplyText);
+}
+
+void SaveVoiceReply() {
+    auto text = panel::ReplyText();
+    const auto first = text.find_first_not_of(L" \t");
+    if (first == std::wstring::npos) {
+        AudioToast(L"Введи фразу для голосового ответа");
+        return;
+    }
+    text = text.substr(first, text.find_last_not_of(L" \t") - first + 1);
+    const auto size = (DWORD)((text.size() + 1) * sizeof(wchar_t));
+    if (RegSetKeyValueW(HKEY_CURRENT_USER, kSettingsKey, L"VoiceReplyText", REG_SZ, text.c_str(), size) != ERROR_SUCCESS) {
+        AudioToast(L"Не удалось сохранить фразу");
+        return;
+    }
+    g_voiceReplyText = std::move(text);
+    panel::UpdateReply(g_voiceReply, g_voiceReplyText);
+    AudioToast(L"Фраза сохранена");
+}
+
+bool SetAudioOutput(const std::wstring& id) {
     const auto error = audio::SwitchTo(id);
     UpdateAudioTray();
     panel::UpdateAudio();
     const auto* active = audio::Find(audio::Current());
     AudioToast(error.empty() && active ? L"Звук: " + active->Label() : error);
+    return error.empty();
 }
 
 void ConfigureAudio(bool adding = false) {
@@ -599,7 +633,7 @@ void ConfigureAudio(bool adding = false) {
     panel::ShowOutputSettings(adding);
 }
 
-void SwitchAudio(int slot) {
+bool SwitchAudio(int slot) {
     audio::Refresh();
     if (slot < 0) {
         const auto cycle = audio::Cycle();
@@ -607,18 +641,17 @@ void SwitchAudio(int slot) {
             UpdateAudioTray();
             if (audio::Configured(0).empty() || audio::Configured(1).empty()) OpenPanel();
             AudioToast(L"Для переключения нужен ещё один доступный выход");
-            return;
+            return false;
         }
         auto next = std::find(cycle.begin(), cycle.end(), audio::Current());
         if (next == cycle.end() || ++next == cycle.end()) next = cycle.begin();
-        SetAudioOutput(*next);
-        return;
+        return SetAudioOutput(*next);
     }
     if (audio::Configured(slot).empty()) {
         ConfigureAudio();
-        return;
+        return false;
     }
-    SetAudioOutput(audio::Configured(slot));
+    return SetAudioOutput(audio::Configured(slot));
 }
 
 void OnResults(std::vector<DeviceStatus>& results) {
@@ -743,7 +776,6 @@ void ShowMenu() {
     HMENU m = CreatePopupMenu();
     AppendMenuW(m, MF_STRING, ID_OPEN_PANEL, L"Открыть Контур");
     AppendMenuW(m, MF_STRING, ID_CONFIGURE_AUDIO, L"Настроить звук");
-    AppendMenuW(m, MF_STRING | (voice::Running() ? MF_CHECKED : 0), ID_VOICE, L"Голосовые команды · Контур");
     SetMenuDefaultItem(m, ID_OPEN_PANEL, FALSE);
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     std::vector<std::wstring> keys;  // device index -> device key; menu id ID_DEVICE_FIRST + index * DEV_STRIDE + command
@@ -789,7 +821,6 @@ void ShowMenu() {
     switch (cmd) {
         case ID_OPEN_PANEL: OpenPanel(); break;
         case ID_CONFIGURE_AUDIO: ConfigureAudio(); break;
-        case ID_VOICE: SetVoice(!voice::Running()); break;
         case ID_REFRESH: battery_monitor::Refresh(); break;
         case ID_AUTOSTART: SetAutostart(!AutostartEnabled()); break;
         case ID_HIDE_LAST_KNOWN: SetHideLastKnown(!g_hideLastKnown); break;
@@ -874,18 +905,37 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 UpdateAudioTray();
                 panel::UpdateAudio();
             }
+            if (wp == panel::ToggleVoice) SetVoice(!voice::Running());
+            if (wp == panel::ToggleReply) {
+                g_voiceReply = !g_voiceReply;
+                SaveBoolSetting(L"VoiceReplyEnabled", g_voiceReply);
+                panel::UpdateReply(g_voiceReply, g_voiceReplyText);
+            }
+            if (wp == panel::SaveReply) SaveVoiceReply();
             return 0;
         case WM_VOICE:
             if (!voice::CurrentEvent(lp)) return 0;
             switch (wp) {
-                case voice::Ready: AudioToast(L"Голосовой режим включён · скажи «Контур»"); break;
-                case voice::Wake: AudioToast(L"Слушаю команду"); break;
-                case voice::Speakers: if (voice::Running()) SwitchAudio(0); break;
-                case voice::Headphones: if (voice::Running()) SwitchAudio(1); break;
+                case voice::Ready: panel::UpdateVoice(true, L"Включены · жду слово «Контур»"); break;
+                case voice::Wake: panel::ShowListening(g_hwnd); break;
+                case voice::Finished: panel::HideListening(); break;
+                case voice::Speakers:
+                case voice::Headphones:
+                    panel::HideListening();
+                    if (voice::Running() && SwitchAudio(wp == voice::Speakers ? 0 : 1) && g_voiceReply)
+                        voice::Reply(g_voiceReplyText);
+                    break;
+                case voice::ReplyError:
+                    AudioToast(L"Windows не смогла озвучить ответ");
+                    break;
                 case voice::MissingFiles:
                 case voice::MicrophoneError:
                 case voice::EngineError:
                     SaveBoolSetting(L"VoiceEnabled", false);
+                    panel::HideListening();
+                    panel::UpdateVoice(false, wp == voice::MicrophoneError ? L"Микрофон недоступен" :
+                                             wp == voice::MissingFiles ? L"Голосовой пакет не найден" :
+                                                                        L"Ошибка распознавания");
                     AudioToast(wp == voice::MissingFiles ? L"Папка voice должна лежать рядом с Kontur.exe" :
                                wp == voice::MicrophoneError ? L"Не удалось открыть микрофон Windows" :
                                                              L"Не удалось загрузить распознавание речи");
@@ -921,6 +971,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         case WM_DESTROY:
+            panel::HideListening();
             voice::Stop();
             audio::Stop();
             if (g_audioAdded) TrayDelete(AUDIO_ID);
@@ -1047,6 +1098,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     UpdatePlaceholder();  // something to click on until the first poll finishes
     audio::Start(g_hwnd, WM_AUDIO_CHANGED);
     UpdateAudioTray();
+    LoadVoiceReply();
     if (LoadBoolSetting(L"VoiceEnabled", false)) SetVoice(true);
     if (!background) OpenPanel();
     SetTimer(g_hwnd, TIMER_WIDGET, 1000, nullptr);

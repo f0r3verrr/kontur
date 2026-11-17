@@ -13,11 +13,17 @@ struct BatteryRow {
     bool low;
 };
 
-enum Action : UINT { SelectOutput, ConfigureOutput, AddOutput, SelectExtra, AudioSettingsChanged };
+enum Action : UINT { SelectOutput, ConfigureOutput, AddOutput, SelectExtra, AudioSettingsChanged,
+                     ToggleVoice, ToggleReply, SaveReply };
 
 bool IsOpen();
 void Show(HWND owner, UINT message);
 void UpdateAudio();
+void UpdateVoice(bool enabled, const std::wstring& status);
+void UpdateReply(bool enabled, const std::wstring& text);
+std::wstring ReplyText();
+void ShowListening(HWND owner);
+void HideListening();
 void ShowOutputSettings(bool adding);
 std::wstring ExtraId(size_t index);
 void SetBatteries(std::vector<BatteryRow> rows);

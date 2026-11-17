@@ -6,6 +6,7 @@
 #include <commctrl.h>
 
 #include <algorithm>
+#include <cmath>
 #include <utility>
 
 namespace {
@@ -16,13 +17,21 @@ constexpr wchar_t kToast[] = L"KonturToast";
 constexpr wchar_t kSpeakers[] = L"Колонки";
 constexpr wchar_t kHeadphones[] = L"Наушники";
 constexpr const wchar_t* kLabels[]{kSpeakers, kHeadphones};
-enum Control : UINT { Speakers = 100, Headphones, Configure, Add, Day, Week, Batteries, Extras, BatteryPage = 200, AudioPage };
-HWND g_panel, g_owner, g_buttons[6], g_list, g_extraList, g_toast, g_settings;
+enum Control : UINT { Speakers = 100, Headphones, Configure, Add, Day, Week, Batteries, Extras, VoiceToggle,
+                      ReplyToggle, ReplyEdit, ReplySave,
+                      BatteryPage = 200, AudioPage, VoicePage };
+HWND g_panel, g_owner, g_buttons[6], g_list, g_extraList, g_toast, g_settings, g_voiceToggle, g_listening;
+HWND g_replyToggle, g_replyEdit, g_replySave;
 UINT g_message;
 size_t g_module;
 std::vector<HWND> g_navigation;
 bool IsAudioPage() { return g_module == 1; }
 bool IsBatteryPage() { return g_module == 0; }
+bool IsVoicePage() { return g_module == 2; }
+bool g_voiceEnabled;
+bool g_replyEnabled = true;
+std::wstring g_replyText = L"Команда выполнена";
+std::wstring g_voiceStatus = L"Выключены · микрофон свободен";
 bool g_oneDay = true;
 HICON g_brand;
 std::vector<panel::BatteryRow> g_rows;
@@ -96,6 +105,13 @@ void Layout(HWND window) {
     MoveWindow(g_buttons[3], left, top + p(301), (std::min)(column, p(203)), p(39), TRUE);
     MoveWindow(g_buttons[4], left + content - p(159), top + p(231), p(75), p(34), TRUE);
     MoveWindow(g_buttons[5], left + content - p(79), top + p(231), p(79), p(34), TRUE);
+    MoveWindow(g_voiceToggle, left + content - p(156), top + p(96), p(134), p(38), TRUE);
+    ShowWindow(g_voiceToggle, IsVoicePage() ? SW_SHOW : SW_HIDE);
+    MoveWindow(g_replyToggle, left + content - p(156), top + p(186), p(134), p(34), TRUE);
+    MoveWindow(g_replyEdit, left + p(22), top + p(237), content - p(172), p(35), TRUE);
+    MoveWindow(g_replySave, left + content - p(139), top + p(235), p(117), p(38), TRUE);
+    for (HWND control : {g_replyToggle, g_replyEdit, g_replySave})
+        ShowWindow(control, IsVoicePage() ? SW_SHOW : SW_HIDE);
     SendMessageW(g_extraList, LB_SETITEMHEIGHT, 0, p(45));
     const int extraHeight = (std::max)(p(45), int(r.bottom) - top - p(318));
     MoveWindow(g_extraList, split, top + p(289), rightWidth,
@@ -142,6 +158,27 @@ void PaintBatteryView(HWND window, HDC dc, const ContentView& view) {
                    g_rows[index].device, g_oneDay);
 }
 
+void PaintVoiceView(HWND, HDC dc, const ContentView& view) {
+    const auto [p, left, right, top, bottom] = view;
+    Font title(p(19), FW_SEMIBOLD, L"Inter");
+    Font label(p(15), FW_SEMIBOLD, L"Inter");
+    Font body(p(14), FW_NORMAL, L"Inter");
+    const long x = left + p(22), edge = right - p(22);
+    Rounded(dc, {left, top + p(66), right, top + p(161)}, p(16), kSurface);
+    Text(dc, {x, top + p(81), edge - p(145), top + p(111)}, L"Голосовые команды", kInk, title.handle);
+    Text(dc, {x, top + p(114), edge - p(145), top + p(144)}, g_voiceStatus,
+         g_voiceEnabled ? kAccent : kQuiet, body.handle);
+    Rounded(dc, {left, top + p(174), right, top + p(290)}, p(16), kSurface);
+    Text(dc, {x, top + p(186), edge - p(145), top + p(220)}, L"Голосовой ответ", kInk, title.handle);
+    Text(dc, {left, top + p(303), edge, top + p(335)}, L"Команды для звука", kInk, label.handle);
+    Fill(dc, {left, top + p(341), right, top + p(342)}, kLine);
+    Text(dc, {left + p(4), top + p(345), edge, top + p(380)}, L"Контур, переключи звук на колонки", kInk, body.handle);
+    Fill(dc, {left, top + p(382), right, top + p(383)}, kLine);
+    Text(dc, {left + p(4), top + p(386), edge, top + p(421)}, L"Контур, переключи звук на наушники", kInk, body.handle);
+    Fill(dc, {left, top + p(423), right, top + p(424)}, kLine);
+    Text(dc, {left, top + p(437), right, top + p(462)}, L"Речь обрабатывается на этом ПК. Записи не сохраняются.", kQuiet, body.handle);
+}
+
 struct ModuleView {
     UINT command;
     const wchar_t* title;
@@ -151,6 +188,7 @@ struct ModuleView {
 constexpr ModuleView kModules[]{
     {BatteryPage, L"Зарядка", L"\uE83F", PaintBatteryView},
     {AudioPage, L"Переключение", L"\uE767", PaintAudioView},
+    {VoicePage, L"Голос", L"\uE720", PaintVoiceView},
 };
 
 void LayoutNavigation(Scale p) {
@@ -291,6 +329,16 @@ LRESULT CALLBACK PanelProc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
                                              0, 0, 0, 0, window, (HMENU)(UINT_PTR)(Speakers + i), inst, nullptr);
             g_list = MakeList(window, Batteries, L"Заряд устройств", inst);
             g_extraList = MakeList(window, Extras, L"Дополнительные аудиовыходы", inst);
+            g_voiceToggle = CreateWindowW(L"BUTTON", g_voiceEnabled ? L"Выключить" : L"Включить",
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 0, 0, window, (HMENU)(UINT_PTR)VoiceToggle, inst, nullptr);
+            g_replyToggle = CreateWindowW(L"BUTTON", g_replyEnabled ? L"Звук включён" : L"Звук выключен",
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 0, 0, window, (HMENU)(UINT_PTR)ReplyToggle, inst, nullptr);
+            g_replyEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_replyText.c_str(),
+                WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0, 0, 0, window, (HMENU)(UINT_PTR)ReplyEdit, inst, nullptr);
+            SendMessageW(g_replyEdit, EM_LIMITTEXT, 120, 0);
+            SendMessageW(g_replyEdit, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), FALSE);
+            g_replySave = CreateWindowW(L"BUTTON", L"Сохранить", WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                0, 0, 0, 0, window, (HMENU)(UINT_PTR)ReplySave, inst, nullptr);
             Layout(window);
             return 0;
         }
@@ -314,6 +362,9 @@ LRESULT CALLBACK PanelProc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
             const auto id = LOWORD(wp);
             if (id == Configure) PostMessageW(g_owner, g_message, panel::ConfigureOutput, 0);
             if (id == Add) PostMessageW(g_owner, g_message, panel::AddOutput, 0);
+            if (id == VoiceToggle) PostMessageW(g_owner, g_message, panel::ToggleVoice, 0);
+            if (id == ReplyToggle) PostMessageW(g_owner, g_message, panel::ToggleReply, 0);
+            if (id == ReplySave) PostMessageW(g_owner, g_message, panel::SaveReply, 0);
             if (id == Extras && HIWORD(wp) == LBN_SELCHANGE) {
                 const auto index = SendMessageW(g_extraList, LB_GETCURSEL, 0, 0);
                 if (index != LB_ERR) SendMessageW(g_owner, g_message, panel::SelectExtra, index);
@@ -344,7 +395,8 @@ LRESULT CALLBACK PanelProc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
             if (item.CtlID == Extras) DrawExtra(item);
             return TRUE;
         }
-        case WM_CTLCOLORLISTBOX: {
+        case WM_CTLCOLORLISTBOX:
+        case WM_CTLCOLOREDIT: {
             static HBRUSH brush = CreateSolidBrush(kBackground);
             SetBkColor((HDC)wp, kBackground);
             SetTextColor((HDC)wp, kInk);
@@ -361,6 +413,8 @@ LRESULT CALLBACK PanelProc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
             g_panel = nullptr;
             g_list = nullptr;
             g_extraList = nullptr;
+            g_voiceToggle = nullptr;
+            g_replyToggle = g_replyEdit = g_replySave = nullptr;
             g_extraIds.clear();
             g_navigation.clear();
             g_rows.clear();
@@ -404,6 +458,65 @@ void Register(HINSTANCE inst, const wchar_t* name, WNDPROC procedure, HICON icon
     cls.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     cls.hIcon = icon;
     RegisterClassW(&cls);
+}
+
+constexpr wchar_t kListeningClass[] = L"KonturListening";
+ULONGLONG g_listeningSince;
+bool g_listeningMotion;
+
+LRESULT CALLBACK ListeningProc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+        case WM_NCHITTEST: return HTTRANSPARENT;
+        case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
+        case WM_ERASEBKGND: return 1;
+        case WM_TIMER:
+            if (!g_listeningMotion || GetTickCount64() - g_listeningSince >= 5400) DestroyWindow(window);
+            else if (g_listeningMotion) InvalidateRect(window, nullptr, FALSE);
+            return 0;
+        case WM_PAINT: {
+            PAINTSTRUCT paint{};
+            HDC target = BeginPaint(window, &paint);
+            RECT r{};
+            GetClientRect(window, &r);
+            HDC buffer = CreateCompatibleDC(target);
+            HBITMAP bitmap = buffer ? CreateCompatibleBitmap(target, r.right, r.bottom) : nullptr;
+            HGDIOBJ old = bitmap ? SelectObject(buffer, bitmap) : nullptr;
+            HDC dc = old ? buffer : target;
+            Scale p{GetDpiForWindow(window)};
+            Fill(dc, r, kLine);
+            RECT inside = r;
+            InflateRect(&inside, -1, -1);
+            Rounded(dc, inside, p(19), kSurface);
+            const auto center = r.right / 2;
+            const auto elapsed = GetTickCount64() - g_listeningSince;
+            const double phase = g_listeningMotion ? elapsed / 180.0 : 0;
+            for (int side : {-1, 1}) {
+                for (int bar = 0; bar < 3; ++bar) {
+                    const int x = center + side * p(25 + bar * 7);
+                    const int amplitude = p(7 + (int)(5 * (1 + std::sin(phase - bar * 0.9 + side * 0.45))));
+                    Rounded(dc, {x - p(2), p(29) - amplitude / 2, x + p(2), p(29) + (amplitude + 1) / 2},
+                            p(4), kAccent);
+                }
+            }
+            Font microphone(p(26), FW_NORMAL, L"Segoe MDL2 Assets");
+            Font caption(p(13), FW_SEMIBOLD, L"Inter");
+            Text(dc, {center - p(16), p(10), center + p(16), p(46)}, L"\uE720", kAccent,
+                 microphone.handle, DT_CENTER);
+            Text(dc, {0, p(47), r.right, p(68)}, L"Слушаю", kInk, caption.handle, DT_CENTER);
+            if (old) {
+                BitBlt(target, 0, 0, r.right, r.bottom, buffer, 0, 0, SRCCOPY);
+                SelectObject(buffer, old);
+            }
+            if (bitmap) DeleteObject(bitmap);
+            if (buffer) DeleteDC(buffer);
+            EndPaint(window, &paint);
+            return 0;
+        }
+        case WM_DESTROY:
+            g_listening = nullptr;
+            return 0;
+    }
+    return DefWindowProcW(window, msg, wp, lp);
 }
 
 enum SettingControl : UINT { OutputList = 400, OutputName, SaveName, SetSpeakers, SetHeadphones, ToggleExtra, ConnectWindows };
@@ -710,6 +823,64 @@ void UpdateAudio() {
     InvalidateRect(g_panel, nullptr, FALSE);
     for (HWND button : g_buttons) InvalidateRect(button, nullptr, FALSE);
     if (g_settings && g_adding) PopulateOutputSettings(SelectedOutput());
+}
+
+void UpdateVoice(bool enabled, const std::wstring& status) {
+    g_voiceEnabled = enabled;
+    g_voiceStatus = status;
+    if (!g_panel) return;
+    SetWindowTextW(g_voiceToggle, enabled ? L"Выключить" : L"Включить");
+    InvalidateRect(g_voiceToggle, nullptr, FALSE);
+    if (IsVoicePage()) InvalidateRect(g_panel, nullptr, FALSE);
+}
+
+void UpdateReply(bool enabled, const std::wstring& text) {
+    const bool changed = text != g_replyText;
+    g_replyEnabled = enabled;
+    g_replyText = text;
+    if (!g_panel) return;
+    SetWindowTextW(g_replyToggle, enabled ? L"Звук включён" : L"Звук выключен");
+    InvalidateRect(g_replyToggle, nullptr, FALSE);
+    if (changed) SetWindowTextW(g_replyEdit, text.c_str());
+}
+
+std::wstring ReplyText() {
+    wchar_t text[121]{};
+    GetWindowTextW(g_replyEdit, text, ARRAYSIZE(text));
+    return text;
+}
+
+void HideListening() {
+    if (g_listening) DestroyWindow(g_listening);
+}
+
+void ShowListening(HWND owner) {
+    HideListening();
+    HINSTANCE inst = (HINSTANCE)GetWindowLongPtrW(owner, GWLP_HINSTANCE);
+    Register(inst, kListeningClass, ListeningProc);
+    HWND foreground = GetForegroundWindow();
+    HMONITOR monitor = MonitorFromWindow(foreground, MONITOR_DEFAULTTOPRIMARY);
+    MONITORINFO screen{sizeof(screen)};
+    if (!GetMonitorInfoW(monitor, &screen)) return;
+    const auto& area = screen.rcWork;
+    const UINT dpi = foreground ? GetDpiForWindow(foreground) : GetDpiForSystem();
+    const Scale p{dpi ? dpi : 96};
+    const int width = p(150), height = p(76);
+    const int left = area.left + (area.right - area.left - width) / 2;
+    const int top = area.top + (area.bottom - area.top) * 58 / 100 - height / 2;
+    g_listening = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOPMOST |
+                                  WS_EX_TOOLWINDOW, kListeningClass, L"Контур слушает команду", WS_POPUP,
+                                  left, top, width, height, owner, nullptr, inst, nullptr);
+    if (!g_listening) return;
+    HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1, p(20), p(20));
+    if (region && !SetWindowRgn(g_listening, region, FALSE)) DeleteObject(region);
+    SetLayeredWindowAttributes(g_listening, 0, 249, LWA_ALPHA);
+    BOOL motion = TRUE;
+    SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &motion, 0);
+    g_listeningMotion = motion != FALSE;
+    g_listeningSince = GetTickCount64();
+    ShowWindow(g_listening, SW_SHOWNOACTIVATE);
+    SetTimer(g_listening, 1, g_listeningMotion ? 38 : 5400, nullptr);
 }
 
 std::wstring ExtraId(size_t index) { return index < g_extraIds.size() ? g_extraIds[index] : L""; }

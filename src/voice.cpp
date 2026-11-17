@@ -1,6 +1,7 @@
 #include "voice.h"
 
 #include <mmsystem.h>
+#include <sapi.h>
 #include <array>
 #include <atomic>
 #include <deque>
@@ -19,13 +20,17 @@ constexpr char kWakeGrammar[] = u8R"(["контур","переключи зву�
 constexpr char kCommands[] = u8R"(["контур переключи звук на колонки","контур переключи звук на наушники","контур переключи на колонки","контур переключи на наушники","переключи звук на колонки","переключи звук на наушники","переключи на колонки","переключи на наушники","[unk]"])";
 
 using Samples = std::array<short, kSamples>;
-HANDLE g_stop, g_thread;
+HANDLE g_stop, g_thread, g_reply;
 HWND g_owner;
 UINT g_message;
 LPARAM g_session;
 std::atomic<bool> g_running;
+std::atomic<bool> g_speaking;
+std::atomic<ULONGLONG> g_mutedUntil;
 
 void Report(voice::Event event) { PostMessageW(g_owner, g_message, event, g_session); }
+
+bool RecognitionPaused(ULONGLONG now) { return g_speaking || now < g_mutedUntil; }
 
 std::string JsonText(const char* json, const char* key) {
     if (!json) return {};
@@ -156,9 +161,11 @@ struct Decoder {
     }
 
     void Finish() {
+        const bool wasListening = command != nullptr;
         command.reset();
         Clear();
         engine.reset(wake.get());
+        if (wasListening) report(voice::Finished);
     }
 
     void Tick(ULONGLONG now) {
@@ -236,16 +243,21 @@ voice::Event Listen() {
     Report(voice::Ready);
     size_t next = 0;
     HANDLE events[]{g_stop, capture.ready};
+    bool wasPaused = false;
     for (;;) {
         const auto wait = WaitForMultipleObjects(2, events, FALSE, decoder.command ? 100 : INFINITE);
         if (wait == WAIT_OBJECT_0) return voice::Ready;
         if (wait == WAIT_FAILED) return voice::MicrophoneError;
-        decoder.Tick(GetTickCount64());
+        const auto now = GetTickCount64();
+        const bool paused = RecognitionPaused(now);
+        if (paused && !wasPaused) decoder.Finish();
+        if (!paused) decoder.Tick(now);
+        wasPaused = paused;
         while (capture.headers[next].dwFlags & WHDR_DONE) {
             if (WaitForSingleObject(g_stop, 0) == WAIT_OBJECT_0) return voice::Ready;
             auto& hdr = capture.headers[next];
             const auto bytes = (int)hdr.dwBytesRecorded;
-            if (bytes && !decoder.Feed(capture.samples[next], bytes, GetTickCount64())) return voice::EngineError;
+            if (bytes && !paused && !decoder.Feed(capture.samples[next], bytes, now)) return voice::EngineError;
             SecureZeroMemory(hdr.lpData, hdr.dwBufferLength);
             if (waveInAddBuffer(capture.mic, &hdr, sizeof(hdr)) != MMSYSERR_NOERROR) return voice::MicrophoneError;
             next = (next + 1) % capture.headers.size();
@@ -257,6 +269,63 @@ DWORD WINAPI Worker(LPVOID) {
     const auto event = Listen();
     g_running = false;
     if (event != voice::Ready && WaitForSingleObject(g_stop, 0) == WAIT_TIMEOUT) Report(event);
+    return 0;
+}
+
+void PreferRussian(ISpVoice* voice) {
+    for (auto path : {L"SOFTWARE\\Microsoft\\Speech\\Voices\\Tokens",
+                      L"SOFTWARE\\Microsoft\\Speech_OneCore\\Voices\\Tokens"}) {
+        HKEY root = nullptr;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, path, 0, KEY_READ, &root) != ERROR_SUCCESS) continue;
+        bool selected = false;
+        for (DWORD i = 0; !selected; ++i) {
+            wchar_t name[256]{};
+            DWORD length = ARRAYSIZE(name);
+            if (RegEnumKeyExW(root, i, name, &length, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS) break;
+            const auto attributes = std::wstring(name) + L"\\Attributes";
+            wchar_t language[64]{};
+            DWORD bytes = sizeof(language);
+            if (RegGetValueW(root, attributes.c_str(), L"Language", RRF_RT_REG_SZ, nullptr, language, &bytes) !=
+                ERROR_SUCCESS || wcstoul(language, nullptr, 16) != 0x419) continue;
+            ISpObjectToken* token = nullptr;
+            if (FAILED(CoCreateInstance(__uuidof(SpObjectToken), nullptr, CLSCTX_INPROC_SERVER,
+                                        __uuidof(ISpObjectToken), (void**)&token))) break;
+            const auto id = std::wstring(L"HKEY_LOCAL_MACHINE\\") + path + L"\\" + name;
+            selected = SUCCEEDED(token->SetId(nullptr, id.c_str(), FALSE)) && SUCCEEDED(voice->SetVoice(token));
+            token->Release();
+        }
+        RegCloseKey(root);
+        if (selected) return;
+    }
+}
+
+DWORD WINAPI Speak(LPVOID payload) {
+    std::unique_ptr<std::wstring> text(static_cast<std::wstring*>(payload));
+    const HRESULT initialized = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    ISpVoice* speaker = nullptr;
+    bool success = false;
+    if (SUCCEEDED(initialized)) {
+        if (SUCCEEDED(CoCreateInstance(__uuidof(SpVoice), nullptr, CLSCTX_INPROC_SERVER,
+                                       __uuidof(ISpVoice), (void**)&speaker))) {
+            PreferRussian(speaker);
+            if (WaitForSingleObject(g_stop, 0) == WAIT_TIMEOUT &&
+                SUCCEEDED(speaker->Speak(text->c_str(), SPF_ASYNC | SPF_IS_NOT_XML, nullptr))) {
+                const auto deadline = GetTickCount64() + 12000;
+                HRESULT result;
+                do {
+                    result = speaker->WaitUntilDone(100);
+                } while (result == S_FALSE && GetTickCount64() < deadline &&
+                         WaitForSingleObject(g_stop, 0) == WAIT_TIMEOUT);
+                success = result == S_OK;
+                if (!success) speaker->Speak(nullptr, SPF_ASYNC | SPF_PURGEBEFORESPEAK, nullptr);
+            }
+            speaker->Release();
+        }
+        CoUninitialize();
+    }
+    g_mutedUntil = GetTickCount64() + 500;
+    g_speaking = false;
+    if (!success && WaitForSingleObject(g_stop, 0) == WAIT_TIMEOUT) Report(voice::ReplyError);
     return 0;
 }
 } // namespace
@@ -282,12 +351,35 @@ void Stop() {
         WaitForSingleObject(g_thread, INFINITE);
         CloseHandle(g_thread);
     }
+    if (g_reply) {
+        WaitForSingleObject(g_reply, INFINITE);
+        CloseHandle(g_reply);
+        g_reply = nullptr;
+    }
     if (g_stop) CloseHandle(g_stop);
     g_thread = g_stop = nullptr;
     g_running = false;
+    g_speaking = false;
+    g_mutedUntil = 0;
     ++g_session;
 }
 
 bool Running() { return g_running; }
 bool CurrentEvent(LPARAM session) { return session == g_session; }
+
+void Reply(const std::wstring& text) {
+    if (!g_running || text.empty()) return;
+    if (g_reply) {
+        if (WaitForSingleObject(g_reply, 0) != WAIT_OBJECT_0) return;
+        CloseHandle(g_reply);
+    }
+    g_speaking = true;
+    auto* payload = new std::wstring(text);
+    g_reply = CreateThread(nullptr, 0, Speak, payload, 0, nullptr);
+    if (!g_reply) {
+        delete payload;
+        g_speaking = false;
+        Report(ReplyError);
+    }
+}
 }
