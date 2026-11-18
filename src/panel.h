@@ -14,7 +14,7 @@ struct BatteryRow {
 };
 
 enum Action : UINT { SelectOutput, ConfigureOutput, AddOutput, SelectExtra, AudioSettingsChanged,
-                     ToggleVoice, ToggleReply, SaveReply, ReplyVolume };
+                     ToggleVoice, ToggleReply, SaveReply, ReplyVolume, CheckUpdates };
 
 bool IsOpen();
 void Show(HWND owner, UINT message);

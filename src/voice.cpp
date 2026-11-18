@@ -16,7 +16,7 @@ constexpr int kRate = 16000;
 constexpr int kSamples = kRate / 10;
 constexpr int kPreRoll = 12;
 constexpr ULONGLONG kCommandTime = 5000;
-constexpr std::string_view kWakeWords[]{u8"контур", u8"конто", u8"кон то"};
+constexpr std::string_view kWakeWords[]{u8"контур"};
 struct Command { std::string_view phrase; voice::Event event; };
 constexpr Command kCommands[]{
     {u8"переключи звук на колонки", voice::Speakers},
@@ -26,6 +26,7 @@ constexpr Command kCommands[]{
     {u8"включи яндекс музыку", voice::OpenMusic},
     {u8"включи яндекс музыку и волну", voice::PlayWave},
     {u8"включи яндекс музыку и мою волну", voice::PlayWave},
+    {u8"выключи музыку", voice::PauseMusic},
 };
 
 std::string Grammar(bool wakeOnly) {

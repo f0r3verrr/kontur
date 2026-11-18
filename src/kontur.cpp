@@ -16,6 +16,7 @@
 #include "devices.h"
 #include "battery_monitor.h"
 #include "voice.h"
+#include "windows_actions.h"
 #include "audio.h"
 #include "history.h"
 #include "panel.h"
@@ -681,6 +682,15 @@ bool OpenYandexMusic(bool playWave) {
     return true;
 }
 
+void CheckUpdates(bool manual) {
+    auto path = ExePath();
+    for (size_t pos = 0; (pos = path.find(L'\'', pos)) != std::wstring::npos; pos += 2)
+        path.insert(pos, 1, L'\'');
+    const auto setup = L"$app='" + path + L"';$appPid=" + std::to_wstring(GetCurrentProcessId()) +
+                       (manual ? L";$manual=$true\n" : L";$manual=$false\n");
+    if (!StartWindowsAction(201, setup.c_str()) && manual) AudioToast(L"Не удалось запустить проверку обновлений");
+}
+
 void OnResults(std::vector<DeviceStatus>& results) {
     std::map<std::wstring, bool> seen;
     for (auto& s : results) {
@@ -940,11 +950,12 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             }
             if (wp == panel::SaveReply) SaveVoiceReply();
             if (wp == panel::ReplyVolume) SetVoiceReplyVolume(LOWORD(lp), HIWORD(lp) != 0);
+            if (wp == panel::CheckUpdates) CheckUpdates(true);
             return 0;
         case WM_VOICE:
             if (!voice::CurrentEvent(lp)) return 0;
             switch (wp) {
-                case voice::Ready: panel::UpdateVoice(true, L"Включены · жду «Контур» или «Конто»"); break;
+                case voice::Ready: panel::UpdateVoice(true, L"Включены · жду «Контур»"); break;
                 case voice::Wake: panel::ShowListening(g_hwnd); break;
                 case voice::Finished: panel::HideListening(); break;
                 case voice::Speakers:
@@ -958,6 +969,10 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                     panel::HideListening();
                     if (voice::Running() && OpenYandexMusic(wp == voice::PlayWave) && g_voiceReply)
                         voice::Reply(g_voiceReplyText, g_voiceReplyVolume);
+                    break;
+                case voice::PauseMusic:
+                    panel::HideListening();
+                    if (voice::Running() && !StartWindowsAction(202)) AudioToast(L"Не удалось поставить музыку на паузу");
                     break;
                 case voice::ReplyError:
                     AudioToast(L"Не удалось озвучить ответ");
@@ -1135,6 +1150,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     LoadVoiceReply();
     if (LoadBoolSetting(L"VoiceEnabled", false)) SetVoice(true);
     if (!background) OpenPanel();
+    CheckUpdates(false);
     SetTimer(g_hwnd, TIMER_WIDGET, 1000, nullptr);
     battery_monitor::Start(g_hwnd, WM_RESULTS);
 

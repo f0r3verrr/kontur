@@ -29,6 +29,8 @@ constexpr COLORREF kReplyInput = RGB(30, 29, 44);
 UINT g_message;
 size_t g_module;
 std::vector<HWND> g_navigation;
+HWND g_checkUpdates;
+constexpr UINT UpdateButton = 300;
 bool IsAudioPage() { return g_module == 1; }
 bool IsBatteryPage() { return g_module == 0; }
 bool IsVoicePage() { return g_module == 2; }
@@ -180,13 +182,14 @@ void PaintVoiceView(HWND, HDC dc, const ContentView& view) {
     Rounded(dc, input, p(11), kReplyInput);
     Text(dc, {left, top + p(303), edge, top + p(332)}, L"Примеры команд", kInk, label.handle);
     const wchar_t* commands[]{L"Контур, переключи звук на колонки", L"Контур, переключи звук на наушники",
-                              L"Конто, включи Яндекс Музыку", L"Конто, включи Яндекс Музыку и волну"};
+                              L"Контур, включи Яндекс Музыку", L"Контур, включи Яндекс Музыку и волну",
+                              L"Контур, выключи музыку"};
     for (int i = 0; i < ARRAYSIZE(commands); ++i) {
-        const int y = top + p(334 + i * 29);
+        const int y = top + p(334 + i * 25);
         Fill(dc, {left, y, right, y + 1}, kLine);
-        Text(dc, {left + p(4), y + 1, edge, y + p(29)}, commands[i], kInk, body.handle);
+        Text(dc, {left + p(4), y + 1, edge, y + p(25)}, commands[i], kInk, body.handle);
     }
-    Text(dc, {left, top + p(456), right, top + p(479)},
+    Text(dc, {left, top + p(460), right, top + p(483)},
          L"Речь обрабатывается на этом ПК. Записи не сохраняются.", kQuiet, body.handle);
 }
 
@@ -205,6 +208,11 @@ constexpr ModuleView kModules[]{
 void LayoutNavigation(Scale p) {
     for (size_t i = 0; i < g_navigation.size(); ++i)
         MoveWindow(g_navigation[i], p(14), p(102 + (int)i * 49), p(186), p(45), TRUE);
+    if (g_checkUpdates) {
+        RECT bounds{};
+        GetClientRect(GetParent(g_checkUpdates), &bounds);
+        MoveWindow(g_checkUpdates, p(14), bounds.bottom - p(56), p(186), p(38), TRUE);
+    }
 }
 
 void PaintPanel(HWND window, HDC dc) {
@@ -255,7 +263,7 @@ void DrawButton(const DRAWITEMSTRUCT& item) {
     const bool selected = (endpoint && endpoint->id == audio::Current()) ||
                           (item.CtlID == Day && g_oneDay) || (item.CtlID == Week && !g_oneDay);
     const bool insideCard = item.CtlID == VoiceToggle || item.CtlID == ReplyToggle || item.CtlID == ReplySave;
-    Fill(item.hDC, r, insideCard ? kSurface : kBackground);
+    Fill(item.hDC, r, item.CtlID == UpdateButton ? kSidebar : insideCard ? kSurface : kBackground);
     Rounded(item.hDC, r, p(13), selected || item.CtlID == Add ? kAccent : kLine);
     InflateRect(&r, -p(1), -p(1));
     const bool disabled = (item.itemState & ODS_DISABLED) != 0;
@@ -344,6 +352,9 @@ LRESULT CALLBACK PanelProc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 0, 0, window,
                     (HMENU)(UINT_PTR)module.command, inst, nullptr));
             }
+            g_checkUpdates = CreateWindowW(L"BUTTON", L"Проверить обновления",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 0, 0, window,
+                (HMENU)(UINT_PTR)UpdateButton, inst, nullptr);
             const wchar_t* labels[]{kSpeakers, kHeadphones, L"Настроить выходы", L"+ Добавить устройство", L"24 часа", L"7 дней"};
             for (UINT i = 0; i < ARRAYSIZE(g_buttons); ++i)
                 g_buttons[i] = CreateWindowW(L"BUTTON", labels[i], WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
@@ -383,6 +394,7 @@ LRESULT CALLBACK PanelProc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_COMMAND: {
             const auto id = LOWORD(wp);
+            if (id == UpdateButton) PostMessageW(g_owner, g_message, panel::CheckUpdates, 0);
             if (id == Configure) PostMessageW(g_owner, g_message, panel::ConfigureOutput, 0);
             if (id == Add) PostMessageW(g_owner, g_message, panel::AddOutput, 0);
             if (id == VoiceToggle) PostMessageW(g_owner, g_message, panel::ToggleVoice, 0);
@@ -449,6 +461,7 @@ LRESULT CALLBACK PanelProc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
             g_replyFont = nullptr;
             g_extraIds.clear();
             g_navigation.clear();
+            g_checkUpdates = nullptr;
             g_rows.clear();
             return 0;
     }

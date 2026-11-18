@@ -16,7 +16,7 @@ build/%.o: src/%.cpp $(wildcard src/*.h src/drivers/*.h)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -municode -c $< -o $@
 
-build/app_res.o: res/app.rc res/app.manifest res/app.ico
+build/app_res.o: res/app.rc res/app.manifest res/app.ico res/update.ps1 res/pause-music.ps1
 	@mkdir -p build
 	$(WINDRES) -i $< -o $@ --include-dir res
 
