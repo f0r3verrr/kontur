@@ -178,13 +178,16 @@ void PaintVoiceView(HWND, HDC dc, const ContentView& view) {
     Rounded(dc, input, p(12), GetFocus() == g_replyEdit ? kAccent : kLine);
     InflateRect(&input, -1, -1);
     Rounded(dc, input, p(11), kReplyInput);
-    Text(dc, {left, top + p(303), edge, top + p(335)}, L"Команды для звука", kInk, label.handle);
-    Fill(dc, {left, top + p(341), right, top + p(342)}, kLine);
-    Text(dc, {left + p(4), top + p(345), edge, top + p(380)}, L"Контур, переключи звук на колонки", kInk, body.handle);
-    Fill(dc, {left, top + p(382), right, top + p(383)}, kLine);
-    Text(dc, {left + p(4), top + p(386), edge, top + p(421)}, L"Контур, переключи звук на наушники", kInk, body.handle);
-    Fill(dc, {left, top + p(423), right, top + p(424)}, kLine);
-    Text(dc, {left, top + p(437), right, top + p(462)}, L"Речь обрабатывается на этом ПК. Записи не сохраняются.", kQuiet, body.handle);
+    Text(dc, {left, top + p(303), edge, top + p(332)}, L"Примеры команд", kInk, label.handle);
+    const wchar_t* commands[]{L"Контур, переключи звук на колонки", L"Контур, переключи звук на наушники",
+                              L"Конто, включи Яндекс Музыку", L"Конто, включи Яндекс Музыку и волну"};
+    for (int i = 0; i < ARRAYSIZE(commands); ++i) {
+        const int y = top + p(334 + i * 29);
+        Fill(dc, {left, y, right, y + 1}, kLine);
+        Text(dc, {left + p(4), y + 1, edge, y + p(29)}, commands[i], kInk, body.handle);
+    }
+    Text(dc, {left, top + p(456), right, top + p(479)},
+         L"Речь обрабатывается на этом ПК. Записи не сохраняются.", kQuiet, body.handle);
 }
 
 struct ModuleView {

@@ -9,17 +9,48 @@
 #include <deque>
 #include <memory>
 #include <string>
+#include <string_view>
 
 namespace {
 constexpr int kRate = 16000;
 constexpr int kSamples = kRate / 10;
 constexpr int kPreRoll = 12;
 constexpr ULONGLONG kCommandTime = 5000;
-constexpr char kWake[] = u8"контур";
-// Alternative phrases are negative examples. With only one real word in the grammar,
-// a speech decoder may force unrelated audio to that word.
-constexpr char kWakeGrammar[] = u8R"(["контур","переключи звук на колонки","переключи звук на наушники","переключи на колонки","переключи на наушники","который","конкурс","контроль","контора","[unk]"])";
-constexpr char kCommands[] = u8R"(["контур переключи звук на колонки","контур переключи звук на наушники","контур переключи на колонки","контур переключи на наушники","переключи звук на колонки","переключи звук на наушники","переключи на колонки","переключи на наушники","[unk]"])";
+constexpr std::string_view kWakeWords[]{u8"контур", u8"конто", u8"кон то"};
+struct Command { std::string_view phrase; voice::Event event; };
+constexpr Command kCommands[]{
+    {u8"переключи звук на колонки", voice::Speakers},
+    {u8"переключи на колонки", voice::Speakers},
+    {u8"переключи звук на наушники", voice::Headphones},
+    {u8"переключи на наушники", voice::Headphones},
+    {u8"включи яндекс музыку", voice::OpenMusic},
+    {u8"включи яндекс музыку и волну", voice::PlayWave},
+    {u8"включи яндекс музыку и мою волну", voice::PlayWave},
+};
+
+std::string Grammar(bool wakeOnly) {
+    std::string grammar = R"(["[unk]")";
+    auto add = [&](std::string_view phrase) { grammar += ",\""; grammar += phrase; grammar += "\""; };
+    for (const auto& command : kCommands) {
+        add(command.phrase);
+        if (!wakeOnly)
+            for (auto word : kWakeWords) add(std::string(word) + " " + std::string(command.phrase));
+    }
+    if (wakeOnly) {
+        for (auto word : kWakeWords) add(word);
+        // Negative examples reduce the chance of forcing unrelated speech to a wake word.
+        for (auto word : {u8"который", u8"конкурс", u8"контроль", u8"контора"}) add(word);
+    }
+    grammar += "]";
+    return grammar;
+}
+
+size_t WakePrefix(std::string_view text) {
+    for (auto word : kWakeWords)
+        if (text.size() > word.size() && text.substr(0, word.size()) == word && text[word.size()] == ' ')
+            return word.size() + 1;
+    return 0;
+}
 
 using Samples = std::array<short, kSamples>;
 HANDLE g_stop, g_thread, g_reply;
@@ -47,11 +78,10 @@ std::string JsonText(const char* json, const char* key) {
     return end == std::string::npos ? std::string{} : value.substr(begin + 1, end - begin - 1);
 }
 
-voice::Event ParseCommand(std::string text) {
-    constexpr char prefix[] = u8"контур ";
-    if (text.compare(0, sizeof(prefix) - 1, prefix) == 0) text.erase(0, sizeof(prefix) - 1);
-    if (text == u8"переключи звук на колонки" || text == u8"переключи на колонки") return voice::Speakers;
-    if (text == u8"переключи звук на наушники" || text == u8"переключи на наушники") return voice::Headphones;
+voice::Event ParseCommand(std::string_view text) {
+    text.remove_prefix(WakePrefix(text));
+    for (const auto& command : kCommands)
+        if (text == command.phrase) return command.event;
     return voice::EngineError;
 }
 
@@ -144,7 +174,7 @@ struct Decoder {
 
     Decoder(Engine& api, void* loadedModel, void (*notify)(voice::Event))
         : engine(api), model(loadedModel), report(notify),
-          wake(api.recognizerNew(model, kRate, kWakeGrammar), api.recognizerFree),
+          wake(api.recognizerNew(model, kRate, Grammar(true).c_str()), api.recognizerFree),
           command(nullptr, api.recognizerFree) {}
     ~Decoder() { Clear(); }
 
@@ -155,8 +185,8 @@ struct Decoder {
 
     bool Submit(const char* json, bool replay = false) {
         auto text = JsonText(json, "\"text\"");
-        if (replay && text.rfind(u8"контур ", 0) != 0) return false;
-        const auto event = ParseCommand(std::move(text));
+        if (replay && !WakePrefix(text)) return false;
+        const auto event = ParseCommand(text);
         if (event == voice::EngineError) return false;
         report(event);
         return true;
@@ -202,10 +232,11 @@ struct Decoder {
         const bool ended = engine.accept(wake.get(), data, bytes) > 0;
         const auto text = ended ? JsonText(engine.result(wake.get()), "\"text\"") :
                                   JsonText(engine.partial(wake.get()), "\"partial\"");
-        consecutive = text == kWake ? consecutive + 1 : 0;
-        if (text != kWake || (!ended && consecutive < 2)) return true;
+        const bool wakeWord = std::find(std::begin(kWakeWords), std::end(kWakeWords), text) != std::end(kWakeWords);
+        consecutive = wakeWord ? consecutive + 1 : 0;
+        if (!wakeWord || (!ended && consecutive < 2)) return true;
         consecutive = 0;
-        command.reset(engine.recognizerNew(model, kRate, kCommands));
+        command.reset(engine.recognizerNew(model, kRate, Grammar(false).c_str()));
         if (!command) return false;
         deadline = now + kCommandTime;
         report(voice::Wake);

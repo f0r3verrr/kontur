@@ -669,6 +669,18 @@ bool SwitchAudio(int slot) {
     return SetAudioOutput(audio::Configured(slot));
 }
 
+bool OpenYandexMusic(bool playWave) {
+    // Yandex Music Desktop handles play-vibe on both cold start and second-instance launch.
+    const wchar_t* url = playWave ? L"yandexmusic://play-vibe?screen=landing&seeds=user%3Aonyourwave"
+                                  : L"yandexmusic://home";
+    if ((INT_PTR)ShellExecuteW(g_hwnd, L"open", url, nullptr, nullptr, SW_SHOWNORMAL) <= 32) {
+        AudioToast(L"Не удалось открыть приложение Яндекс Музыка");
+        return false;
+    }
+    AudioToast(playWave ? L"Запуск «Моей волны»" : L"Открываю Яндекс Музыку");
+    return true;
+}
+
 void OnResults(std::vector<DeviceStatus>& results) {
     std::map<std::wstring, bool> seen;
     for (auto& s : results) {
@@ -932,13 +944,19 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_VOICE:
             if (!voice::CurrentEvent(lp)) return 0;
             switch (wp) {
-                case voice::Ready: panel::UpdateVoice(true, L"Включены · жду слово «Контур»"); break;
+                case voice::Ready: panel::UpdateVoice(true, L"Включены · жду «Контур» или «Конто»"); break;
                 case voice::Wake: panel::ShowListening(g_hwnd); break;
                 case voice::Finished: panel::HideListening(); break;
                 case voice::Speakers:
                 case voice::Headphones:
                     panel::HideListening();
                     if (voice::Running() && SwitchAudio(wp == voice::Speakers ? 0 : 1) && g_voiceReply)
+                        voice::Reply(g_voiceReplyText, g_voiceReplyVolume);
+                    break;
+                case voice::OpenMusic:
+                case voice::PlayWave:
+                    panel::HideListening();
+                    if (voice::Running() && OpenYandexMusic(wp == voice::PlayWave) && g_voiceReply)
                         voice::Reply(g_voiceReplyText, g_voiceReplyVolume);
                     break;
                 case voice::ReplyError:

@@ -3,7 +3,8 @@
 #include <string>
 
 namespace voice {
-enum Event : WPARAM { Ready, Wake, Finished, Speakers, Headphones, MissingFiles, MicrophoneError, EngineError, ReplyError };
+enum Event : WPARAM { Ready, Wake, Finished, Speakers, Headphones, OpenMusic, PlayWave,
+                     MissingFiles, MicrophoneError, EngineError, ReplyError };
 bool Start(HWND owner, UINT message);
 void Stop();
 bool Running();
