@@ -1,14 +1,9 @@
 $ErrorActionPreference = 'Stop'
-function Notice($message) {
-    Add-Type -AssemblyName System.Windows.Forms
-    [void][Windows.Forms.MessageBox]::Show($message, 'Контур')
-}
 $lock = [Threading.Mutex]::new($false, 'Local\KonturUpdate')
 try { $locked = $lock.WaitOne(0) } catch [Threading.AbandonedMutexException] { $locked = $true }
 if (!$locked) {
-    if ($manual) { Notice 'Проверка обновлений уже идёт.' }
     $lock.Dispose()
-    exit
+    exit 2
 }
 $stage = "$app.update"
 $backup = "$app.previous"
@@ -20,8 +15,7 @@ try {
     $next = [version]$Matches[1]
     $current = [version]([Diagnostics.FileVersionInfo]::GetVersionInfo($app).FileVersion)
     if ($next -le $current) {
-        if ($manual) { Notice 'У тебя уже последняя версия Контура.' }
-        return
+        exit 0
     }
     $asset = $release.assets | Where-Object name -eq 'Kontur-update-win-x64.exe' | Select-Object -First 1
     $uri = "https://github.com/f0r3verrr/kontur/releases/download/$($release.tag_name)/Kontur-update-win-x64.exe"
@@ -35,7 +29,7 @@ try {
         throw 'Update verification failed'
     }
     $parent = Get-Process -Id $appPid -ErrorAction SilentlyContinue
-    if (!$parent -or $parent.Path -ne $app) { return }
+    if (!$parent -or $parent.Path -ne $app) { exit 3 }
     & $app --quit
     if (!$parent.WaitForExit(12000)) { throw 'Kontur did not exit' }
     try {
@@ -53,7 +47,7 @@ try {
     }
     Remove-Item -LiteralPath $backup -ErrorAction SilentlyContinue
 } catch {
-    if ($manual) { Notice 'Не удалось проверить или установить обновление. Попробуй ещё раз позже.' }
+    exit 3
 } finally {
     Remove-Item -LiteralPath $stage -ErrorAction SilentlyContinue
     $lock.ReleaseMutex()

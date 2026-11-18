@@ -30,6 +30,7 @@ constexpr UINT WM_WIDGET_CLICK = WM_APP + 3;
 constexpr UINT WM_AUDIO_CHANGED = WM_APP + 4;
 constexpr UINT WM_PANEL_ACTION = WM_APP + 5;
 constexpr UINT WM_VOICE = WM_APP + 7;
+constexpr UINT WM_UPDATE_RESULT = WM_APP + 8;
 constexpr UINT WM_SHOW_PANEL = WM_APP + 6;
 constexpr UINT_PTR TIMER_DEBOUNCE = 1;
 constexpr UINT_PTR TIMER_WIDGET = 2;
@@ -683,12 +684,14 @@ bool OpenYandexMusic(bool playWave) {
 }
 
 void CheckUpdates(bool manual) {
+    if (manual) panel::ShowUpdateStatus(-1);
     auto path = ExePath();
     for (size_t pos = 0; (pos = path.find(L'\'', pos)) != std::wstring::npos; pos += 2)
         path.insert(pos, 1, L'\'');
     const auto setup = L"$app='" + path + L"';$appPid=" + std::to_wstring(GetCurrentProcessId()) +
                        (manual ? L";$manual=$true\n" : L";$manual=$false\n");
-    if (!StartWindowsAction(201, setup.c_str()) && manual) AudioToast(L"Не удалось запустить проверку обновлений");
+    if (!StartWindowsAction(201, setup.c_str(), manual ? g_hwnd : nullptr, WM_UPDATE_RESULT) && manual)
+        panel::ShowUpdateStatus(3);
 }
 
 void OnResults(std::vector<DeviceStatus>& results) {
@@ -951,6 +954,9 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (wp == panel::SaveReply) SaveVoiceReply();
             if (wp == panel::ReplyVolume) SetVoiceReplyVolume(LOWORD(lp), HIWORD(lp) != 0);
             if (wp == panel::CheckUpdates) CheckUpdates(true);
+            return 0;
+        case WM_UPDATE_RESULT:
+            panel::ShowUpdateStatus((int)wp);
             return 0;
         case WM_VOICE:
             if (!voice::CurrentEvent(lp)) return 0;

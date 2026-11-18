@@ -505,6 +505,50 @@ void Register(HINSTANCE inst, const wchar_t* name, WNDPROC procedure, HICON icon
     RegisterClassW(&cls);
 }
 
+HWND g_updateDialog;
+int g_updateStatus;
+
+LRESULT CALLBACK UpdateDialogProc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
+    const Scale p{GetDpiForWindow(window)};
+    switch (msg) {
+        case WM_CREATE:
+            CreateWindowW(L"BUTTON", L"Закрыть", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                          p(274), p(124), p(110), p(37), window, (HMENU)(UINT_PTR)IDCANCEL,
+                          (HINSTANCE)GetWindowLongPtrW(window, GWLP_HINSTANCE), nullptr);
+            return 0;
+        case WM_COMMAND:
+            if (LOWORD(wp) == IDCANCEL) DestroyWindow(window);
+            return 0;
+        case WM_DRAWITEM:
+            DrawButton(*reinterpret_cast<DRAWITEMSTRUCT*>(lp));
+            return TRUE;
+        case WM_PAINT: {
+            PAINTSTRUCT paint{};
+            auto dc = BeginPaint(window, &paint);
+            RECT bounds{};
+            GetClientRect(window, &bounds);
+            Fill(dc, bounds, kBackground);
+            Rounded(dc, {p(22), p(23), p(62), p(63)}, p(14), kSurface);
+            Font icon(p(20), FW_NORMAL, L"Segoe MDL2 Assets");
+            Font title(p(19), FW_SEMIBOLD, L"Inter");
+            Font body(p(13), FW_NORMAL, L"Inter");
+            const bool latest = g_updateStatus == 0;
+            const bool failed = g_updateStatus > 2;
+            Text(dc, {p(22), p(23), p(62), p(63)}, latest ? L"\uE73E" : failed ? L"\uE7BA" : L"\uE72C",
+                 failed ? kAmber : kAccent, icon.handle, DT_CENTER);
+            Text(dc, {p(75), p(21), p(384), p(64)}, latest ? L"Последняя версия установлена" :
+                 failed ? L"Проверка не удалась" : L"Проверяем обновления", kInk, title.handle);
+            Text(dc, {p(22), p(73), p(384), p(102)}, latest ? L"Контур уже обновлён." :
+                 failed ? L"Попробуй ещё раз позже." : L"Ищем свежую версию на GitHub…", kQuiet, body.handle);
+            Fill(dc, {p(22), p(111), p(384), p(112)}, kLine);
+            EndPaint(window, &paint);
+            return 0;
+        }
+        case WM_DESTROY: g_updateDialog = nullptr; return 0;
+    }
+    return DefWindowProcW(window, msg, wp, lp);
+}
+
 constexpr wchar_t kListeningClass[] = L"KonturListening";
 ULONGLONG g_listeningSince;
 bool g_listeningMotion;
@@ -846,6 +890,29 @@ namespace panel {
 
 bool IsOpen() { return g_panel != nullptr; }
 
+void ShowUpdateStatus(int status) {
+    if (!g_panel || (status >= 0 && !g_updateDialog)) return;
+    g_updateStatus = status;
+    if (!g_updateDialog) {
+        const auto inst = (HINSTANCE)GetWindowLongPtrW(g_panel, GWLP_HINSTANCE);
+        constexpr wchar_t dialogClass[] = L"KonturUpdateDialog";
+        Register(inst, dialogClass, UpdateDialogProc, g_brand);
+        const Scale p{GetDpiForWindow(g_panel)};
+        constexpr DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
+        RECT size{0, 0, p(406), p(182)}, owner{};
+        AdjustWindowRectExForDpi(&size, style, FALSE, WS_EX_CONTROLPARENT, p.dpi);
+        GetWindowRect(g_panel, &owner);
+        const int width = size.right - size.left, height = size.bottom - size.top;
+        g_updateDialog = CreateWindowExW(WS_EX_CONTROLPARENT, dialogClass, L"Обновления", style,
+            (owner.left + owner.right - width) / 2, (owner.top + owner.bottom - height) / 2,
+            width, height, g_panel, nullptr, inst, nullptr);
+        if (!g_updateDialog) return;
+        DarkCaption(g_updateDialog);
+        ShowWindow(g_updateDialog, SW_SHOW);
+    }
+    InvalidateRect(g_updateDialog, nullptr, FALSE);
+}
+
 void Show(HWND owner, UINT message) {
     if (!g_panel) {
         g_owner = owner;
@@ -1014,6 +1081,13 @@ void SetBatteries(std::vector<BatteryRow> rows) {
 }
 
 bool HandleKeyboard(MSG& message) {
+    if (g_updateDialog && (message.hwnd == g_updateDialog || IsChild(g_updateDialog, message.hwnd))) {
+        if (message.message == WM_KEYDOWN && message.wParam == VK_ESCAPE) {
+            DestroyWindow(g_updateDialog);
+            return true;
+        }
+        return IsDialogMessageW(g_updateDialog, &message);
+    }
     if (g_settings && (message.hwnd == g_settings || IsChild(g_settings, message.hwnd))) {
         if (message.message == WM_KEYDOWN && message.wParam == VK_ESCAPE) {
             DestroyWindow(g_settings);

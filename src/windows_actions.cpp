@@ -1,7 +1,21 @@
 #include "windows_actions.h"
 #include <string>
+#include <memory>
 
-bool StartWindowsAction(UINT resource, const wchar_t* setup) {
+namespace {
+struct ActionResult { HANDLE process; HWND window; UINT message; };
+DWORD WINAPI WaitForAction(void* context) {
+    std::unique_ptr<ActionResult> result(static_cast<ActionResult*>(context));
+    DWORD code = 3;
+    if (WaitForSingleObject(result->process, INFINITE) == WAIT_OBJECT_0)
+        GetExitCodeProcess(result->process, &code);
+    CloseHandle(result->process);
+    PostMessageW(result->window, result->message, code, 0);
+    return 0;
+}
+}
+
+bool StartWindowsAction(UINT resource, const wchar_t* setup, HWND notify, UINT message) {
     const auto module = GetModuleHandleW(nullptr);
     const auto script = FindResourceW(module, MAKEINTRESOURCEW(resource), RT_RCDATA);
     if (!script) return false;
@@ -32,6 +46,15 @@ bool StartWindowsAction(UINT resource, const wchar_t* setup) {
     if (!CreateProcessW(exe.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
                         nullptr, nullptr, &startup, &child)) return false;
     CloseHandle(child.hThread);
+    if (notify) {
+        auto result = std::make_unique<ActionResult>(ActionResult{child.hProcess, notify, message});
+        if (QueueUserWorkItem(WaitForAction, result.get(), WT_EXECUTELONGFUNCTION)) {
+            result.release();
+            return true;
+        }
+        CloseHandle(child.hProcess);
+        return false;
+    }
     CloseHandle(child.hProcess);
     return true;
 }
