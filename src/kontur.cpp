@@ -17,6 +17,7 @@
 #include "devices.h"
 #include "battery_monitor.h"
 #include "voice.h"
+#include "music_volume.h"
 #include "windows_actions.h"
 #include "audio.h"
 #include "history.h"
@@ -864,11 +865,27 @@ void MusicAction(voice::Event event) {
         event == voice::PreviousTrack ? L"$mode='previous';" :
         event == voice::CurrentTrack ? L"$mode='track';" :
         event == voice::LikeTrack ? L"$mode='like';" :
-        event == voice::RemoveLike ? L"$mode='unlike';" : L"$mode='pause';";
+        event == voice::RemoveLike ? L"$mode='unlike';" :
+        event == voice::ResumeMusic ? L"$mode='play';" : L"$mode='pause';";
     if (!StartWindowsAction(202, setup, g_hwnd, WM_MUSIC_RESULT, event == voice::CurrentTrack, (unsigned)event))
         MusicReply(L"Не удалось выполнить команду Яндекс Музыки");
     else if (changesLike)
         g_likePending = true;
+}
+
+void MusicVolumeAction(int percent, bool relative, voice::Event event) {
+    struct Request { HWND window; int percent; bool relative; voice::Event event; };
+    auto* request = new Request{g_hwnd, percent, relative, event};
+    const auto run = [](void* data) -> DWORD {
+        std::unique_ptr<Request> request(static_cast<Request*>(data));
+        const DWORD result = music_volume::Set(request->percent, request->relative) ? 0 : 5;
+        PostMessageW(request->window, WM_MUSIC_RESULT, result | (WPARAM(request->event) << 32), 0);
+        return 0;
+    };
+    if (!QueueUserWorkItem(run, request, WT_EXECUTELONGFUNCTION)) {
+        delete request;
+        MusicReply(L"Не удалось изменить громкость Яндекс Музыки");
+    }
 }
 
 void CancelMusicTimer() {
@@ -1025,6 +1042,10 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (wp == panel::AudioSettingsChanged) {
                 UpdateAudioTray();
                 panel::UpdateAudio();
+                if (voice::Running()) {
+                    voice::Stop();
+                    SetVoice(true);
+                }
             }
             if (wp == panel::ToggleVoice) SetVoice(!voice::Running());
             if (wp == panel::ToggleReply) {
@@ -1044,14 +1065,24 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             const auto action = static_cast<voice::Event>(wp >> 32);
             const auto result = static_cast<DWORD>(wp);
             if (action == voice::LikeTrack || action == voice::RemoveLike) g_likePending = false;
+            const bool volume = action == voice::MusicLouder || action == voice::MusicQuieter ||
+                (action >= voice::MusicVolume && action <= voice::MusicVolume + 100);
             if (result == 4) MusicReply(L"Яндекс Музыка сейчас не играет");
-            else if (result == 5) MusicReply(L"Кнопка лайка недоступна. Открой окно Яндекс Музыки");
-            else if (result == 6) MusicReply(action == voice::RemoveLike ?
-                L"Яндекс Музыка не подтвердила снятие лайка" : L"Яндекс Музыка не подтвердила лайк");
+            else if (result == 5) MusicReply(volume ? L"Ползунок громкости Яндекс Музыки недоступен. Открой окно приложения" :
+                L"Кнопка лайка недоступна. Открой окно Яндекс Музыки");
+            else if (result == 6) MusicReply(volume ? L"Яндекс Музыка не подтвердила громкость" :
+                action == voice::RemoveLike ? L"Яндекс Музыка не подтвердила снятие лайка" :
+                L"Яндекс Музыка не подтвердила лайк");
             else if (result) MusicReply(L"Яндекс Музыка не выполнила команду");
             else if (title && !title->empty()) MusicReply(*title);
+            else if (action >= voice::MusicVolume && action <= voice::MusicVolume + 100)
+                MusicReply(L"Громкость Яндекс Музыки " + std::to_wstring(action - voice::MusicVolume) + L" процентов");
+            else if (action == voice::MusicLouder || action == voice::MusicQuieter)
+                MusicReply(action == voice::MusicLouder ? L"Сделала музыку громче" : L"Сделала музыку тише");
             else if (action == voice::LikeTrack) MusicReply(L"Трек в коллекции");
             else if (action == voice::RemoveLike) MusicReply(L"У трека нет лайка");
+            else if (action == voice::ResumeMusic && g_voiceReply && voice::Running())
+                voice::Reply(g_voiceReplyText, g_voiceReplyVolume);
             else if ((action == voice::NextTrack || action == voice::PreviousTrack) && g_voiceReply && voice::Running())
                 voice::Reply(g_voiceReplyText, g_voiceReplyVolume);
             return 0;
@@ -1062,9 +1093,15 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 panel::HideListening();
                 if (!voice::Running()) return 0;
                 const int percent = int(wp - voice::MusicVolume);
-                if (audio::AppVolume(true, percent))
-                    MusicReply(L"Громкость Яндекс Музыки " + std::to_wstring(percent) + L" процентов");
-                else MusicReply(L"В микшере Windows нет Яндекс Музыки");
+                MusicVolumeAction(percent, false, static_cast<voice::Event>(wp));
+                return 0;
+            }
+            if (wp >= voice::NamedOutput) {
+                panel::HideListening();
+                if (voice::Running()) {
+                    const auto id = voice::OutputId(unsigned(wp - voice::NamedOutput));
+                    if (!id.empty()) SetAudioOutput(id);
+                }
                 return 0;
             }
             if (wp >= voice::DiscordVolume && wp <= voice::DiscordVolume + 100) {
@@ -1122,6 +1159,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                         voice::Reply(g_voiceReplyText, g_voiceReplyVolume);
                     break;
                 case voice::PauseMusic:
+                case voice::ResumeMusic:
                 case voice::NextTrack:
                 case voice::PreviousTrack:
                 case voice::LikeTrack:
@@ -1138,7 +1176,11 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                     if (!voice::Running()) break;
                     const bool music = wp == voice::MusicQuieter || wp == voice::MusicLouder;
                     const bool louder = wp == voice::MusicLouder || wp == voice::DiscordLouder;
-                    if (audio::AppVolume(music, louder ? 10 : -10, true))
+                    if (music) {
+                        MusicVolumeAction(louder ? 10 : -10, true, static_cast<voice::Event>(wp));
+                        break;
+                    }
+                    if (audio::AppVolume(false, louder ? 10 : -10, true))
                         MusicReply(louder ? L"Сделала громче" : L"Сделала тише");
                     else MusicReply(music ? L"В микшере Windows нет Яндекс Музыки" : L"В микшере Windows нет Discord");
                     break;

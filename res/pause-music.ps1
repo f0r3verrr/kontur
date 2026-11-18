@@ -171,7 +171,8 @@ $names = @('Яндекс Музыка.exe', 'YandexMusic.exe')
 $service = Wait-Media ($manager::RequestAsync()) $manager
 $sessions = @($service.GetSessions() | Where-Object {
     $id = $_.SourceAppUserModelId
-    $id -in $names -or $id -match '(?i)(?:^|[.!\\])YandexMusic(?:$|[.!])'
+    $id -in $names -or $id -eq 'ru.yandex.desktop.music' -or
+        $id -match '(?i)(?:^|[.!\\])YandexMusic(?:$|[.!])'
 })
 $session = $sessions | Sort-Object { $_.GetPlaybackInfo().PlaybackStatus -eq 'Playing' } -Descending | Select-Object -First 1
 if (!$session) {
@@ -182,6 +183,9 @@ if ($mode -eq 'next') {
     if (!(Wait-Media ($session.TrySkipNextAsync()) ([bool]))) { exit 3 }
 } elseif ($mode -eq 'previous') {
     if (!(Wait-Media ($session.TrySkipPreviousAsync()) ([bool]))) { exit 3 }
+} elseif ($mode -eq 'play') {
+    if ($session.GetPlaybackInfo().PlaybackStatus -ne 'Playing' -and
+        !(Wait-Media ($session.TryPlayAsync()) ([bool]))) { exit 3 }
 } elseif ($mode -eq 'track') {
     $track = Wait-Media ($session.TryGetMediaPropertiesAsync()) $metadata
     if (!$track.Title) { exit 4 }

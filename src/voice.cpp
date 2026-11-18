@@ -1,4 +1,5 @@
 #include "voice.h"
+#include "audio.h"
 #include "neural_reply.h"
 
 #include <mmsystem.h>
@@ -31,6 +32,9 @@ const std::vector<Command>& Commands() {
     {u8"включи яндекс музыку и волну", voice::PlayWave},
     {u8"включи яндекс музыку и мою волну", voice::PlayWave},
     {u8"выключи музыку", voice::PauseMusic},
+    {u8"включи музыку", voice::ResumeMusic},
+    {u8"продолжи музыку", voice::ResumeMusic},
+    {u8"сними музыку с паузы", voice::ResumeMusic},
     {u8"следующий трек", voice::NextTrack},
     {u8"поставь лайк", voice::LikeTrack},
     {u8"убери лайк", voice::RemoveLike},
@@ -75,6 +79,7 @@ const std::vector<Command>& Commands() {
     {u8"музыку на максимум", static_cast<voice::Event>(voice::MusicVolume + 100)},
     {u8"поставь музыку на паузу", voice::PauseMusic},
     {u8"останови музыку", voice::PauseMusic},
+    {u8"возобнови музыку", voice::ResumeMusic},
     };
     const char* small[]{u8"ноль", u8"один", u8"два", u8"три", u8"четыре", u8"пять", u8"шесть", u8"семь", u8"восемь", u8"девять",
         u8"десять", u8"одиннадцать", u8"двенадцать", u8"тринадцать", u8"четырнадцать", u8"пятнадцать", u8"шестнадцать", u8"семнадцать", u8"восемнадцать", u8"девятнадцать"};
@@ -115,6 +120,8 @@ const std::vector<Command>& Commands() {
 
 std::mutex g_profilesMutex;
 voice::Profiles g_profiles;
+std::vector<Command> g_outputCommands;
+std::vector<std::wstring> g_outputIds;
 constexpr wchar_t kProfileKey[] = L"Software\\WirelessBattery\\VoiceScenarios";
 
 std::string PhraseUtf8(const std::wstring& phrase) {
@@ -122,6 +129,37 @@ std::string PhraseUtf8(const std::wstring& phrase) {
     std::string result(size, '\0');
     if (size) WideCharToMultiByte(CP_UTF8, 0, phrase.data(), int(phrase.size()), result.data(), size, nullptr, nullptr);
     return result;
+}
+
+std::wstring VoiceOutputName(const std::wstring& label) {
+    std::wstring result;
+    for (wchar_t c : label) {
+        if (c >= L'А' && c <= L'Я') c += L'а' - L'А';
+        if (c == L'Ё') c = L'ё';
+        if (c == L' ') {
+            if (!result.empty() && result.back() != L' ') result += c;
+        } else if ((c >= L'а' && c <= L'я') || c == L'ё') result += c;
+        else return {};
+    }
+    if (!result.empty() && result.back() == L' ') result.pop_back();
+    return result;
+}
+
+void SnapshotOutputCommands() {
+    g_outputCommands.clear();
+    g_outputIds.clear();
+    for (const auto& endpoint : audio::Endpoints()) {
+        if (!endpoint.available || endpoint.alias.empty()) continue;
+        const auto name = VoiceOutputName(endpoint.alias);
+        if (name.empty() || name == L"колонки" || name == L"наушники") continue;
+        if (std::find_if(g_outputCommands.begin(), g_outputCommands.end(), [&](const Command& command) {
+                return command.phrase == u8"переключи звук на " + PhraseUtf8(name);
+            }) != g_outputCommands.end()) continue;
+        const auto event = static_cast<voice::Event>(voice::NamedOutput + g_outputIds.size());
+        g_outputCommands.push_back({u8"переключи звук на " + PhraseUtf8(name), event});
+        g_outputCommands.push_back({u8"переключи на " + PhraseUtf8(name), event});
+        g_outputIds.push_back(endpoint.id);
+    }
 }
 
 std::string Grammar(bool wakeOnly) {
@@ -141,6 +179,10 @@ std::string Grammar(bool wakeOnly) {
                 add(command.phrase + u8" пожалуйста");
             }
         }
+    }
+    for (const auto& command : g_outputCommands) {
+        add(command.phrase);
+        if (!wakeOnly) add(std::string(kWakeWords[0]) + " " + command.phrase);
     }
     if (!wakeOnly) {
         std::lock_guard<std::mutex> guard(g_profilesMutex);
@@ -208,6 +250,8 @@ voice::Event ParseCommand(std::string_view text) {
     if (text.size() > please.size() && text.substr(text.size() - please.size()) == please)
         text.remove_suffix(please.size());
     for (const auto& command : Commands())
+        if (text == command.phrase) return command.event;
+    for (const auto& command : g_outputCommands)
         if (text == command.phrase) return command.event;
     std::lock_guard<std::mutex> guard(g_profilesMutex);
     for (unsigned i = 0; i < g_profiles.size(); ++i)
@@ -560,6 +604,7 @@ bool SaveProfile(unsigned slot, const Profile& profile) {
 bool Start(HWND owner, UINT message) {
     if (g_running) return true;
     Stop();
+    SnapshotOutputCommands();
     g_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (!g_stop) return false;
     g_owner = owner;
@@ -593,6 +638,7 @@ void Stop() {
 
 bool Running() { return g_running; }
 bool CurrentEvent(LPARAM session) { return session == g_session; }
+std::wstring OutputId(unsigned index) { return index < g_outputIds.size() ? g_outputIds[index] : L""; }
 
 void Reply(const std::wstring& text, int volume) {
     if (!g_running || text.empty() || volume <= 0) return;
