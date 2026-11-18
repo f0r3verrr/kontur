@@ -19,6 +19,7 @@ enum Action : UINT { SelectOutput, ConfigureOutput, AddOutput, SelectExtra, Audi
 bool IsOpen();
 void Show(HWND owner, UINT message);
 void ShowUpdateStatus(int status);
+void UpdateAvailable(bool available);
 void UpdateAudio();
 void UpdateVoice(bool enabled, const std::wstring& status);
 void UpdateReply(bool enabled, const std::wstring& text);

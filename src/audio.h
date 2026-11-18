@@ -16,6 +16,7 @@ struct Endpoint {
 void Start(HWND owner, UINT message);
 void Stop();
 void Refresh();
+bool AppVolume(bool music, int percent, bool relative = false);
 const std::vector<Endpoint>& Endpoints();
 const std::wstring& Current();
 const std::wstring& Configured(int slot);

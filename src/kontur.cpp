@@ -9,6 +9,7 @@
 #include <climits>
 #include <cstdio>
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -32,6 +33,10 @@ constexpr UINT WM_PANEL_ACTION = WM_APP + 5;
 constexpr UINT WM_VOICE = WM_APP + 7;
 constexpr UINT WM_UPDATE_RESULT = WM_APP + 8;
 constexpr UINT WM_SHOW_PANEL = WM_APP + 6;
+constexpr UINT WM_MUSIC_RESULT = WM_APP + 9;
+constexpr UINT_PTR TIMER_MUSIC = 3;
+constexpr UINT_PTR TIMER_INSTALL_UPDATE = 4;
+ULONGLONG g_musicDeadline;
 constexpr UINT_PTR TIMER_DEBOUNCE = 1;
 constexpr UINT_PTR TIMER_WIDGET = 2;
 constexpr int LOW_BATTERY = 15;
@@ -40,7 +45,7 @@ constexpr UINT AUDIO_ID = 0xFFFF;
 
 enum MenuId : UINT {
     ID_REFRESH = 100, ID_AUTOSTART, ID_HIDE_LAST_KNOWN, ID_WIDGET_BACKGROUND, ID_EXIT, ID_MODE_WIDGET, ID_MODE_TRAY, ID_SUPPORT,
-    ID_OPEN_PANEL, ID_CONFIGURE_AUDIO,
+    ID_OPEN_PANEL, ID_CONFIGURE_AUDIO, ID_CANCEL_TIMER,
     ID_DEVICE_FIRST = 1000
 };
 enum DeviceCmd : UINT { DEV_TOGGLE, DEV_LEFT, DEV_RIGHT, DEV_HISTORY, DEV_STRIDE };
@@ -495,7 +500,7 @@ std::vector<TrayEntry*> OrderedEntries(bool shownOnly) {
 }
 
 void UpdateWidget() {
-    if (!g_useWidget) return;
+    if (!g_wantWidget || !widget::Alive()) return;
     std::vector<TrayEntry*> list = OrderedEntries(true);
     std::vector<WidgetItem> items;
     std::wstring tip;
@@ -683,15 +688,52 @@ bool OpenYandexMusic(bool playWave) {
     return true;
 }
 
-void CheckUpdates(bool manual) {
-    if (manual) panel::ShowUpdateStatus(-1);
+bool g_updateBusy, g_manualUpdate, g_updateAvailable;
+enum UpdatePhase : unsigned { ProbeUpdate = 1, InstallUpdate };
+
+void StartUpdate(UpdatePhase phase) {
     auto path = ExePath();
     for (size_t pos = 0; (pos = path.find(L'\'', pos)) != std::wstring::npos; pos += 2)
         path.insert(pos, 1, L'\'');
-    const auto setup = L"$app='" + path + L"';$appPid=" + std::to_wstring(GetCurrentProcessId()) +
-                       (manual ? L";$manual=$true\n" : L";$manual=$false\n");
-    if (!StartWindowsAction(201, setup.c_str(), manual ? g_hwnd : nullptr, WM_UPDATE_RESULT) && manual)
+    auto setup = L"$app='" + path + L"';$appPid=" + std::to_wstring(GetCurrentProcessId()) +
+                 (g_manualUpdate ? L";$manual=$true" : L";$manual=$false");
+    setup += phase == ProbeUpdate ? L";$probe=$true\n" : L";$probe=$false\n";
+    g_updateBusy = StartWindowsAction(201, setup.c_str(), g_hwnd, WM_UPDATE_RESULT, false, phase);
+    if (!g_updateBusy && g_manualUpdate) {
+        g_manualUpdate = false;
         panel::ShowUpdateStatus(3);
+    }
+}
+
+void CheckUpdates(bool manual) {
+    g_manualUpdate = g_manualUpdate || manual;
+    if (manual) panel::ShowUpdateStatus(g_updateAvailable ? -2 : -1);
+    if (g_updateBusy) return;
+    if (manual && g_updateAvailable) {
+        KillTimer(g_hwnd, TIMER_INSTALL_UPDATE);
+        StartUpdate(InstallUpdate);
+    } else StartUpdate(ProbeUpdate);
+}
+
+void OnUpdateResult(UpdatePhase phase, int result) {
+    g_updateBusy = false;
+    if (phase == ProbeUpdate && result == 4) {
+        g_updateAvailable = true;
+        panel::UpdateAvailable(true);
+        if (g_manualUpdate) {
+            panel::ShowUpdateStatus(-2);
+            StartUpdate(InstallUpdate);
+        } else if (!SetTimer(g_hwnd, TIMER_INSTALL_UPDATE, 6000, nullptr)) {
+            StartUpdate(InstallUpdate);
+        }
+        return;
+    }
+    if (result == 0) {
+        g_updateAvailable = false;
+        panel::UpdateAvailable(false);
+    }
+    if (g_manualUpdate) panel::ShowUpdateStatus(result);
+    g_manualUpdate = false;
 }
 
 void OnResults(std::vector<DeviceStatus>& results) {
@@ -735,17 +777,14 @@ void OnResults(std::vector<DeviceStatus>& results) {
 // Makes the actual display match the chosen mode; falls back to tray icons if the taskbar
 // widget cannot be created (e.g. Explorer not ready yet). Called once a second.
 void Reconcile() {
-    bool alive = g_wantWidget && widget::Alive();
-    if (g_wantWidget && !alive) alive = widget::Create(g_inst, g_hwnd, WM_WIDGET_CLICK, g_lightTaskbar);
     if (!g_wantWidget) widget::Destroy();
-    bool changed = alive != g_useWidget;
-    g_useWidget = alive;
-    if (changed) {
+    else if (!widget::Alive() && widget::Create(g_inst, g_hwnd, WM_WIDGET_CLICK, g_lightTaskbar))
+        UpdateWidget();
+    const bool visible = g_wantWidget && widget::Reposition();
+    if (visible != g_useWidget) {
+        g_useWidget = visible;
         for (auto& [k, e] : g_entries) ApplyEntry(e);
         UpdatePlaceholder();
-        UpdateWidget();
-    } else if (g_useWidget) {
-        widget::Reposition();
     }
 }
 
@@ -811,11 +850,52 @@ void MoveEntry(const std::wstring& key, int dir) {
     UpdateWidget();
 }
 
+void MusicReply(const std::wstring& text) {
+    AudioToast(text);
+    if (g_voiceReply && voice::Running()) voice::Reply(text, g_voiceReplyVolume);
+}
+
+bool g_likePending;
+
+void MusicAction(voice::Event event) {
+    const bool changesLike = event == voice::LikeTrack || event == voice::RemoveLike;
+    if (changesLike && g_likePending) return;
+    const wchar_t* setup = event == voice::NextTrack ? L"$mode='next';" :
+        event == voice::PreviousTrack ? L"$mode='previous';" :
+        event == voice::CurrentTrack ? L"$mode='track';" :
+        event == voice::LikeTrack ? L"$mode='like';" :
+        event == voice::RemoveLike ? L"$mode='unlike';" : L"$mode='pause';";
+    if (!StartWindowsAction(202, setup, g_hwnd, WM_MUSIC_RESULT, event == voice::CurrentTrack, (unsigned)event))
+        MusicReply(L"Не удалось выполнить команду Яндекс Музыки");
+    else if (changesLike)
+        g_likePending = true;
+}
+
+void CancelMusicTimer() {
+    KillTimer(g_hwnd, TIMER_MUSIC);
+    g_musicDeadline = 0;
+}
+
+void CheckMusicTimer() {
+    if (!g_musicDeadline || GetTickCount64() < g_musicDeadline) return;
+    CancelMusicTimer();
+    MusicAction(voice::PauseMusic);
+}
+
 void ShowMenu() {
     ApplyMenuTheme(g_lightTaskbar);
     HMENU m = CreatePopupMenu();
     AppendMenuW(m, MF_STRING, ID_OPEN_PANEL, L"Открыть Контур");
     AppendMenuW(m, MF_STRING, ID_CONFIGURE_AUDIO, L"Настроить звук");
+    if (g_musicDeadline) {
+        const auto now = GetTickCount64();
+        const auto seconds = g_musicDeadline > now ? (g_musicDeadline - now + 999) / 1000 : 0;
+        const auto remainder = seconds % 60;
+        const auto label = L"Таймер музыки · " + std::to_wstring(seconds / 60) + L":" +
+            (remainder < 10 ? L"0" : L"") + std::to_wstring(remainder);
+        AppendMenuW(m, MF_STRING | MF_GRAYED, 0, label.c_str());
+        AppendMenuW(m, MF_STRING, ID_CANCEL_TIMER, L"Отменить таймер музыки");
+    }
     SetMenuDefaultItem(m, ID_OPEN_PANEL, FALSE);
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     std::vector<std::wstring> keys;  // device index -> device key; menu id ID_DEVICE_FIRST + index * DEV_STRIDE + command
@@ -859,6 +939,7 @@ void ShowMenu() {
     PostMessageW(g_hwnd, WM_NULL, 0, 0);
     DestroyMenu(m);
     switch (cmd) {
+        case ID_CANCEL_TIMER: CancelMusicTimer(); AudioToast(L"Таймер музыки отменён"); break;
         case ID_OPEN_PANEL: OpenPanel(); break;
         case ID_CONFIGURE_AUDIO: ConfigureAudio(); break;
         case ID_REFRESH: battery_monitor::Refresh(); break;
@@ -956,10 +1037,74 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (wp == panel::CheckUpdates) CheckUpdates(true);
             return 0;
         case WM_UPDATE_RESULT:
-            panel::ShowUpdateStatus((int)wp);
+            OnUpdateResult(static_cast<UpdatePhase>(wp >> 32), static_cast<int>(LOWORD(wp)));
             return 0;
+        case WM_MUSIC_RESULT: {
+            std::unique_ptr<std::wstring> title(reinterpret_cast<std::wstring*>(lp));
+            const auto action = static_cast<voice::Event>(wp >> 32);
+            const auto result = static_cast<DWORD>(wp);
+            if (action == voice::LikeTrack || action == voice::RemoveLike) g_likePending = false;
+            if (result == 4) MusicReply(L"Яндекс Музыка сейчас не играет");
+            else if (result == 5) MusicReply(L"Кнопка лайка недоступна. Открой окно Яндекс Музыки");
+            else if (result == 6) MusicReply(action == voice::RemoveLike ?
+                L"Яндекс Музыка не подтвердила снятие лайка" : L"Яндекс Музыка не подтвердила лайк");
+            else if (result) MusicReply(L"Яндекс Музыка не выполнила команду");
+            else if (title && !title->empty()) MusicReply(*title);
+            else if (action == voice::LikeTrack) MusicReply(L"Трек в коллекции");
+            else if (action == voice::RemoveLike) MusicReply(L"У трека нет лайка");
+            else if ((action == voice::NextTrack || action == voice::PreviousTrack) && g_voiceReply && voice::Running())
+                voice::Reply(g_voiceReplyText, g_voiceReplyVolume);
+            return 0;
+        }
         case WM_VOICE:
             if (!voice::CurrentEvent(lp)) return 0;
+            if (wp >= voice::MusicVolume && wp <= voice::MusicVolume + 100) {
+                panel::HideListening();
+                if (!voice::Running()) return 0;
+                const int percent = int(wp - voice::MusicVolume);
+                if (audio::AppVolume(true, percent))
+                    MusicReply(L"Громкость Яндекс Музыки " + std::to_wstring(percent) + L" процентов");
+                else MusicReply(L"В микшере Windows нет Яндекс Музыки");
+                return 0;
+            }
+            if (wp >= voice::DiscordVolume && wp <= voice::DiscordVolume + 100) {
+                panel::HideListening();
+                if (voice::Running()) {
+                    const int percent = int(wp - voice::DiscordVolume);
+                    if (audio::AppVolume(false, percent))
+                        MusicReply(L"Громкость Discord " + std::to_wstring(percent) + L" процентов");
+                    else MusicReply(L"В микшере Windows нет Discord");
+                }
+                return 0;
+            }
+            if (wp > voice::MusicTimer && wp <= voice::MusicTimer + 100) {
+                panel::HideListening();
+                if (!voice::Running()) return 0;
+                const auto minutes = UINT(wp - voice::MusicTimer);
+                const auto duration = minutes * 60000;
+                if (SetTimer(h, TIMER_MUSIC, duration, nullptr)) {
+                    g_musicDeadline = GetTickCount64() + duration;
+                    MusicReply(L"Таймер музыки установлен");
+                } else MusicReply(L"Не удалось установить таймер");
+                return 0;
+            }
+            if (wp >= voice::Scenario && wp < voice::Scenario + voice::ScenarioCount) {
+                panel::HideListening();
+                if (!voice::Running()) return 0;
+                const unsigned actions = voice::LoadProfiles()[wp - voice::Scenario].actions;
+                if (!actions) return 0;
+                bool ok = true;
+                if (actions & voice::Headset) ok = SwitchAudio(1);
+                if (actions & voice::Speaker) ok = SwitchAudio(0);
+                if (actions & voice::Pause) MusicAction(voice::PauseMusic);
+                if (actions & voice::Discord) {
+                    const auto result = ShellExecuteW(h, L"open", L"discord://-/channels/@me", nullptr, nullptr, SW_SHOWNORMAL);
+                    ok = reinterpret_cast<INT_PTR>(result) > 32 && ok;
+                }
+                if (!ok) MusicReply(L"Часть действий сценария не выполнена");
+                else if (g_voiceReply) voice::Reply(g_voiceReplyText, g_voiceReplyVolume);
+                return 0;
+            }
             switch (wp) {
                 case voice::Ready: panel::UpdateVoice(true, L"Включены · жду «Контур»"); break;
                 case voice::Wake: panel::ShowListening(g_hwnd); break;
@@ -977,8 +1122,38 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                         voice::Reply(g_voiceReplyText, g_voiceReplyVolume);
                     break;
                 case voice::PauseMusic:
+                case voice::NextTrack:
+                case voice::PreviousTrack:
+                case voice::LikeTrack:
+                case voice::RemoveLike:
+                case voice::CurrentTrack:
                     panel::HideListening();
-                    if (voice::Running() && !StartWindowsAction(202)) AudioToast(L"Не удалось поставить музыку на паузу");
+                    if (voice::Running()) MusicAction(static_cast<voice::Event>(wp));
+                    break;
+                case voice::DiscordQuieter:
+                case voice::DiscordLouder:
+                case voice::MusicQuieter:
+                case voice::MusicLouder: {
+                    panel::HideListening();
+                    if (!voice::Running()) break;
+                    const bool music = wp == voice::MusicQuieter || wp == voice::MusicLouder;
+                    const bool louder = wp == voice::MusicLouder || wp == voice::DiscordLouder;
+                    if (audio::AppVolume(music, louder ? 10 : -10, true))
+                        MusicReply(louder ? L"Сделала громче" : L"Сделала тише");
+                    else MusicReply(music ? L"В микшере Windows нет Яндекс Музыки" : L"В микшере Windows нет Discord");
+                    break;
+                }
+                case voice::Unrecognized:
+                    MusicReply(L"Не разобрала команду. Повтори, пожалуйста");
+                    break;
+                case voice::CancelTimer:
+                    panel::HideListening();
+                    if (voice::Running()) {
+                        if (g_musicDeadline) {
+                            CancelMusicTimer();
+                            MusicReply(L"Таймер музыки отменён");
+                        } else MusicReply(L"Таймер музыки выключен");
+                    }
                     break;
                 case voice::ReplyError:
                     AudioToast(L"Не удалось озвучить ответ");
@@ -1007,11 +1182,22 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (wp == DBT_DEVICEARRIVAL || wp == DBT_DEVICEREMOVECOMPLETE) RefreshSoon(2500);
             return TRUE;
         case WM_POWERBROADCAST:
-            if (wp == PBT_APMRESUMEAUTOMATIC) RefreshSoon(5000);
+            if (wp == PBT_APMRESUMEAUTOMATIC) { RefreshSoon(5000); CheckMusicTimer(); }
             return TRUE;
         case WM_TIMER:
             if (wp == TIMER_DEBOUNCE) { KillTimer(h, TIMER_DEBOUNCE); battery_monitor::Refresh(); }
             if (wp == TIMER_WIDGET) Reconcile();
+            if (wp == TIMER_INSTALL_UPDATE) {
+                KillTimer(h, TIMER_INSTALL_UPDATE);
+                if (g_updateAvailable && !g_updateBusy) StartUpdate(InstallUpdate);
+            }
+            if (wp == TIMER_MUSIC) {
+                CheckMusicTimer();
+                if (g_musicDeadline) {
+                    const auto now = GetTickCount64();
+                    SetTimer(h, TIMER_MUSIC, UINT(g_musicDeadline > now ? g_musicDeadline - now : 1), nullptr);
+                }
+            }
             return 0;
         case WM_SETTINGCHANGE:
             if (lp && !lstrcmpW((LPCWSTR)lp, L"ImmersiveColorSet")) {
@@ -1153,6 +1339,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     UpdatePlaceholder();  // something to click on until the first poll finishes
     audio::Start(g_hwnd, WM_AUDIO_CHANGED);
     UpdateAudioTray();
+    voice::LoadProfiles();
     LoadVoiceReply();
     if (LoadBoolSetting(L"VoiceEnabled", false)) SetVoice(true);
     if (!background) OpenPanel();

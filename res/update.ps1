@@ -17,6 +17,7 @@ try {
     if ($next -le $current) {
         exit 0
     }
+    if ($probe) { exit 4 }
     $asset = $release.assets | Where-Object name -eq 'Kontur-update-win-x64.exe' | Select-Object -First 1
     $uri = "https://github.com/f0r3verrr/kontur/releases/download/$($release.tag_name)/Kontur-update-win-x64.exe"
     if (!$asset -or $asset.browser_download_url -ne $uri -or $asset.digest -notmatch '^sha256:[a-f0-9]{64}$') {

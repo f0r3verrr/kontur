@@ -2,13 +2,13 @@
 #include <windows.h>
 
 namespace appearance {
-constexpr COLORREF kBackground = RGB(24, 24, 35);
-constexpr COLORREF kSidebar = RGB(31, 30, 45);
-constexpr COLORREF kSurface = RGB(37, 36, 53);
-constexpr COLORREF kLine = RGB(60, 57, 80);
-constexpr COLORREF kInk = RGB(241, 239, 250);
-constexpr COLORREF kQuiet = RGB(174, 168, 194);
-constexpr COLORREF kAccent = RGB(184, 167, 255);
+constexpr COLORREF kBackground = RGB(14, 15, 26);
+constexpr COLORREF kSidebar = RGB(18, 18, 33);
+constexpr COLORREF kSurface = RGB(24, 26, 43);
+constexpr COLORREF kLine = RGB(53, 51, 80);
+constexpr COLORREF kInk = RGB(237, 241, 250);
+constexpr COLORREF kQuiet = RGB(170, 170, 195);
+constexpr COLORREF kAccent = RGB(192, 168, 255);
 constexpr COLORREF kAmber = RGB(255, 192, 128);
 
 inline void DarkCaption(HWND window) {
@@ -17,7 +17,12 @@ inline void DarkCaption(HWND window) {
     using SetAttribute = HRESULT (WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
     auto set = reinterpret_cast<SetAttribute>(GetProcAddress(dwm, "DwmSetWindowAttribute"));
     BOOL dark = TRUE;
-    if (set) set(window, 20, &dark, sizeof(dark));
+    if (set) {
+        set(window, 20, &dark, sizeof(dark));
+        set(window, 35, &kBackground, sizeof(kBackground)); // DWMWA_CAPTION_COLOR (Windows 11)
+        set(window, 34, &kLine, sizeof(kLine));             // DWMWA_BORDER_COLOR
+        set(window, 36, &kInk, sizeof(kInk));               // DWMWA_TEXT_COLOR
+    }
     FreeLibrary(dwm);
 }
 }

@@ -1,7 +1,7 @@
 ; Inno Setup script for Kontur (https://jrsoftware.org/isinfo.php).
 ; Per-user install by default: no administrator rights needed, installs to %LOCALAPPDATA%\Programs.
 ; Setup also offers "Install for all users" (Program Files, needs administrator rights).
-; Build with installer\build-installer.ps1 (or: ISCC /DAppVersion=1.2.3 installer\Kontur.iss).
+; Build with installer\build-installer.ps1 with -VoiceDir.
 
 #ifndef AppVersion
   #define AppVersion "1.0.0"
@@ -36,6 +36,12 @@ CloseApplications=no
 Name: "autostart"; Description: "Start Kontur when I sign in to Windows"
 
 [Files]
+#ifndef UpdateOnly
+#ifndef VoiceDir
+#error VoiceDir must point to a complete voice package for a fresh install.
+#endif
+Source: "{#VoiceDir}\*"; DestDir: "{app}\voice"; Flags: ignoreversion recursesubdirs createallsubdirs
+#endif
 Source: "{#Root}\Kontur.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Root}\third_party\headsetcontrol\headsetcontrol.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Root}\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion

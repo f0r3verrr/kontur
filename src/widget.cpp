@@ -36,6 +36,7 @@ int Px(int v) { return MulDiv(v, Dpi(), 96); }
 // ("Cross-process", waiting on WirelessBattery.exe) and restarted, again and again. So the lookup
 // runs on its own thread, which owns no windows, and the UI thread only reads the last rectangle.
 SRWLOCK g_wbLock = SRWLOCK_INIT;
+RECT g_clockRect{};
 RECT g_wbRect{};             // last Widgets button rectangle (screen), empty when unknown
 HWND g_wbRectBar;            // taskbar g_wbRect was found in (guarded by g_wbLock)
 HWND g_wbTaskbar;            // taskbar to search, null while there is no widget (guarded by g_wbLock)
@@ -45,31 +46,49 @@ DWORD WINAPI WidgetsButtonThread(LPVOID) {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     IUIAutomation* uia = nullptr;
     IUIAutomationElement* btn = nullptr;
+    IUIAutomationElement* clock = nullptr;
     HWND btnBar = nullptr;
     for (;;) {
         WaitForSingleObject(g_wbWake, btnBar ? 5000 : INFINITE);  // no widget (tray-icon mode): sleep until one
         AcquireSRWLockShared(&g_wbLock);
         HWND bar = g_wbTaskbar;
         ReleaseSRWLockShared(&g_wbLock);
-        if (btn && bar != btnBar) { btn->Release(); btn = nullptr; }
+        if (bar != btnBar) {
+            if (btn) btn->Release();
+            if (clock) clock->Release();
+            btn = clock = nullptr;
+        }
         btnBar = bar;
-        RECT r{};
+        RECT r{}, clockBounds{};
         if (bar && IsWindow(bar)) {
             if (!uia)
                 CoCreateInstance(__uuidof(CUIAutomation), nullptr, CLSCTX_INPROC_SERVER, __uuidof(IUIAutomation), (void**)&uia);
-            if (uia && !btn) {
-                IUIAutomationElement* root = nullptr;
-                IUIAutomationCondition* cond = nullptr;
-                VARIANT id;
-                VariantInit(&id);
-                id.vt = VT_BSTR;
-                id.bstrVal = SysAllocString(L"WidgetsButton");
-                if (SUCCEEDED(uia->ElementFromHandle(bar, &root)) && root &&
-                    SUCCEEDED(uia->CreatePropertyCondition(UIA_AutomationIdPropertyId, id, &cond)) && cond)
-                    root->FindFirst(TreeScope_Descendants, cond, &btn);
-                VariantClear(&id);
-                if (cond) cond->Release();
-                if (root) root->Release();
+            if (uia && (!btn || !clock)) {
+                IUIAutomationElement* taskbar = nullptr;
+                if (SUCCEEDED(uia->ElementFromHandle(bar, &taskbar)) && taskbar) {
+                    auto find = [&](const wchar_t* name, IUIAutomationElement** result) {
+                        VARIANT id{};
+                        id.vt = VT_BSTR;
+                        id.bstrVal = SysAllocString(name);
+                        IUIAutomationCondition* condition = nullptr;
+                        if (SUCCEEDED(uia->CreatePropertyCondition(UIA_AutomationIdPropertyId, id, &condition)) && condition) {
+                            taskbar->FindFirst(TreeScope_Descendants, condition, result);
+                            condition->Release();
+                        }
+                        VariantClear(&id);
+                    };
+                    if (!btn) find(L"WidgetsButton", &btn);
+                    if (!clock) for (const auto* id : {L"SystemTray.DateTimeIcon", L"DateTimeIcon", L"ClockButton", L"TrayClock"}) {
+                        find(id, &clock);
+                        if (clock) break;
+                    }
+                    taskbar->Release();
+                }
+            }
+            if (clock && FAILED(clock->get_CurrentBoundingRectangle(&clockBounds))) {
+                clock->Release();
+                clock = nullptr;
+                clockBounds = {};
             }
             if (btn && FAILED(btn->get_CurrentBoundingRectangle(&r))) {
                 btn->Release();  // stale (Widgets turned off, Explorer restarted): look it up again next time
@@ -80,6 +99,7 @@ DWORD WINAPI WidgetsButtonThread(LPVOID) {
         AcquireSRWLockExclusive(&g_wbLock);
         if (bar && g_wbTaskbar == bar) {  // drop a result for a taskbar we no longer sit on
             g_wbRect = r;
+            g_clockRect = clockBounds;
             g_wbRectBar = bar;
         }
         ReleaseSRWLockExclusive(&g_wbLock);
@@ -107,6 +127,19 @@ RECT WidgetsButtonRect() {
     RECT r = g_wbRectBar && g_wbRectBar == g_wbTaskbar ? g_wbRect : RECT{};
     ReleaseSRWLockShared(&g_wbLock);
     return r;
+}
+
+RECT ClockRect(HWND tray) {
+    AcquireSRWLockShared(&g_wbLock);
+    RECT bounds = g_wbRectBar && g_wbRectBar == g_wbTaskbar ? g_clockRect : RECT{};
+    ReleaseSRWLockShared(&g_wbLock);
+    for (auto parent : {tray, g_taskbar}) {
+        HWND clock = FindWindowExW(parent, nullptr, L"TrayClockWClass", nullptr);
+        RECT native{};
+        if (clock && IsWindowVisible(clock) && GetWindowRect(clock, &native))
+            UnionRect(&bounds, &bounds, &native);
+    }
+    return bounds;
 }
 
 void ApplyTipTheme() {
@@ -445,14 +478,28 @@ bool Reposition() {
     if (!Alive()) return false;
     if (Dpi() != g_lastDpi) { g_lastDpi = Dpi(); Paint(); }
     HWND tray = FindWindowExW(g_taskbar, nullptr, L"TrayNotifyWnd", nullptr);
-    if (!tray) return true;
+    if (!tray || !IsWindowVisible(tray)) {
+        ShowWindow(g_wnd, SW_HIDE);
+        g_lastLeft = -1;
+        return false;
+    }
     RECT tr, bar;
     GetWindowRect(tray, &tr);
     GetWindowRect(g_taskbar, &bar);
     // Right-to-left Windows (Hebrew, Arabic) mirrors the taskbar: client x runs from the screen's right
     // edge, so a window's client-space left edge is its screen-space right edge.
     bool rtl = GetWindowLongW(g_taskbar, GWL_EXSTYLE) & WS_EX_LAYOUTRTL;
-    int edge = rtl ? tr.right : tr.left;  // screen x we sit next to
+    int edge = rtl ? tr.right : tr.left;
+    RECT clock = ClockRect(tray), visibleClock{};
+    if (IntersectRect(&visibleClock, &clock, &bar))
+        edge = rtl ? (std::max)(edge, int(visibleClock.right) + Px(6))
+                   : (std::min)(edge, int(visibleClock.left) - Px(6));
+    else if (tr.right - tr.left < Px(72)) {
+        // A narrow tray host may omit the clock on customized taskbars.
+        ShowWindow(g_wnd, SW_HIDE);
+        g_lastLeft = -1;
+        return false;
+    }
     // Windows 10: News and Interests / Weather sits immediately left of the tray. The window that hosts it
     // depends on the build: ShellFeedsTaskbarViewWindow on some, DynamicContent2 on others (e.g. 19045,
     // where the search highlights button is DynamicContent1). Both are direct children of the taskbar and
@@ -481,6 +528,14 @@ bool Reposition() {
     if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\WirelessBattery", L"TaskbarOffset",
                      RRF_RT_REG_DWORD, nullptr, &customOffset, &sz) == ERROR_SUCCESS) {
         left -= Px((int)customOffset);
+    }
+
+    RECT client{};
+    GetClientRect(g_taskbar, &client);
+    if (left < 0 || left + g_size.cx > client.right) {
+        ShowWindow(g_wnd, SW_HIDE);
+        g_lastLeft = -1;
+        return false;
     }
 
     // Windows 10: Explorer re-expands the task buttons on its own layout passes; narrow them again.

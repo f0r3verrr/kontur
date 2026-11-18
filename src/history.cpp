@@ -91,14 +91,14 @@ void PaintTrace(HDC dc, const RECT& bounds, const RECT& plot, const std::vector<
     graphics.TranslateTransform((REAL)bounds.left, (REAL)bounds.top);
     graphics.SetSmoothingMode(SmoothingModeAntiAlias);
     const RectF frame(0, 0, (REAL)(bounds.right - bounds.left), (REAL)(bounds.bottom - bounds.top));
-    LinearGradientBrush background(frame, Color(39, 37, 57), Color(32, 31, 47), 80.0f);
+    LinearGradientBrush background(frame, Color(26, 27, 44), Color(22, 22, 38), 80.0f);
     graphics.FillRectangle(&background, frame);
     if (plot.right <= plot.left || plot.bottom <= plot.top) return;
 
     const PointF top(0, (REAL)plot.top - 3 * scale), bottom(0, (REAL)plot.bottom + 3 * scale);
     LinearGradientBrush fill(top, bottom, Color(58, 184, 167, 255), Color(0, 126, 104, 203));
     LinearGradientBrush line(top, bottom, Color(222, 210, 255), Color(155, 141, 232));
-    Pen grid(Color(46, 214, 179, 233), 1);
+    Pen grid(Color(38, 175, 187, 219), 1);
     for (int step = 0; step <= 4; ++step) {
         const int y = plot.top + (plot.bottom - plot.top) * step / 4;
         graphics.DrawLine(&grid, (int)plot.left, y, (int)plot.right, y);
@@ -141,14 +141,14 @@ void PaintTrace(HDC dc, const RECT& bounds, const RECT& plot, const std::vector<
     }
 }
 
-void PaintChart(HWND window, HDC dc, const RECT& bounds, const DeviceStatus& device, bool oneDay) {
+void PaintChart(HWND window, HDC dc, const RECT& bounds, const DeviceStatus& device, bool oneDay, bool showHeader = true) {
     using namespace appearance;
     const int saved = SaveDC(dc);
     IntersectClipRect(dc, bounds.left, bounds.top, bounds.right, bounds.bottom);
     const RECT client{0, 0, bounds.right - bounds.left, bounds.bottom - bounds.top};
     const UINT dpi = GetDpiForWindow(window);
     auto px = [dpi](int x) { return MulDiv(x, dpi, 96); };
-    const RECT plot{px(53), px(72), client.right - px(50), client.bottom - px(34)};
+    const RECT plot{px(48), px(showHeader ? 72 : 14), client.right - px(44), client.bottom - px(31)};
     const auto now = Now();
     const auto range = oneDay ? kDay : kWeek;
     const auto& record = Load(device.key);
@@ -182,22 +182,25 @@ void PaintChart(HWND window, HDC dc, const RECT& bounds, const DeviceStatus& dev
     auto label = [dc](int x, int y, const std::wstring& text) {
         TextOutW(dc, x, y, text.c_str(), (int)text.size());
     };
-    const auto summary = history::ChargeSummary(device, true);
-    SetTextColor(dc, kInk);
-    SelectObject(dc, title);
-    RECT name{px(16), px(10), client.right - px(124), px(37)};
-    DrawTextW(dc, device.name.c_str(), (int)device.name.size(), &name,
-              DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
-    SelectObject(dc, value);
-    SetTextColor(dc, kAccent);
-    RECT stat{client.right - px(116), px(9), client.right - px(18), px(41)};
-    const int percent = device.percent >= 0 ? device.percent : -1;
-    const auto current = device.usbOnly ? L"USB" : percent >= 0 ? std::to_wstring(percent) + L"%" : L"–";
-    DrawTextW(dc, current.c_str(), (int)current.size(), &stat, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
-    SelectObject(dc, font);
-    SetTextColor(dc, kQuiet);
-    if (!summary.empty()) label(px(16), px(41), summary);
+    if (showHeader) {
+        const auto summary = history::ChargeSummary(device, true);
+        SetTextColor(dc, kInk);
+        SelectObject(dc, title);
+        RECT name{px(16), px(10), client.right - px(124), px(37)};
+        DrawTextW(dc, device.name.c_str(), (int)device.name.size(), &name,
+                  DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+        SelectObject(dc, value);
+        SetTextColor(dc, kAccent);
+        RECT stat{client.right - px(116), px(9), client.right - px(18), px(41)};
+        const int percent = device.percent >= 0 ? device.percent : -1;
+        const auto current = device.usbOnly ? L"USB" : percent >= 0 ? std::to_wstring(percent) + L"%" : L"–";
+        DrawTextW(dc, current.c_str(), (int)current.size(), &stat, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+        SelectObject(dc, font);
+        SetTextColor(dc, kQuiet);
+        if (!summary.empty()) label(px(16), px(41), summary);
 
+    }
+    SetTextColor(dc, kQuiet);
     const auto [left, top, right, bottom] = plot;
     if (right > left && bottom > top) {
         for (int percent : {100, 75, 50, 25, 0}) {
@@ -249,8 +252,8 @@ LRESULT CALLBACK HistoryProc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
 
 namespace history {
 
-void Paint(HWND window, HDC dc, const RECT& bounds, const DeviceStatus& device, bool oneDay) {
-    PaintChart(window, dc, bounds, device, oneDay);
+void Paint(HWND window, HDC dc, const RECT& bounds, const DeviceStatus& device, bool oneDay, bool showHeader) {
+    PaintChart(window, dc, bounds, device, oneDay, showHeader);
 }
 
 void Observe(const DeviceStatus& device) {
@@ -305,6 +308,10 @@ std::wstring LastReadingAge(const std::wstring& key) {
     auto time = Load(key).events.lastReading.time;
     return time ? Ago(time) : L"";
 }
+
+std::int64_t LastCharging(const std::wstring& key) { return Load(key).events.lastCharging; }
+
+std::wstring ChargingAge(std::int64_t timestamp) { return timestamp ? Ago(timestamp, true) : L"—"; }
 
 std::wstring ChargeSummary(const DeviceStatus& device, bool russian) {
     const auto& events = Load(device.key).events;

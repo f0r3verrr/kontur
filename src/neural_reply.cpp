@@ -10,7 +10,21 @@ namespace {
 constexpr DWORD kRate = 22050;
 constexpr size_t kMaxPcm = kRate * 2 * 20;
 constexpr wchar_t kModel[] = L"ru_RU-denis-medium.onnx";
+constexpr wchar_t kIrina[] = L"ru_RU-irina-medium.onnx";
 std::string g_lastText;
+std::wstring g_lastModel;
+
+const wchar_t* Model(const std::wstring& folder) {
+    auto exists = [&](const std::wstring& path) {
+        const auto attributes = GetFileAttributesW(path.c_str());
+        return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+    };
+    for (auto model : {kIrina, kModel}) {
+        const auto path = folder + model;
+        if (exists(path) && exists(path + L".json")) return model;
+    }
+    return nullptr;
+}
 std::vector<char> g_lastPcm;
 
 struct Close {
@@ -76,7 +90,9 @@ bool Synthesize(const std::wstring& folder, const std::string& text, HANDLE stop
     Handle errors(CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_WRITE, &security, OPEN_EXISTING, 0, nullptr));
     if (errors.get() == INVALID_HANDLE_VALUE) return false;
     const auto exe = folder + L"piper.exe";
-    auto command = L"\"" + exe + L"\" --model " + kModel + L" --output_raw";
+    const auto model = Model(folder);
+    if (!model) return false;
+    auto command = L"\"" + exe + L"\" --model " + model + L" --output_raw";
     STARTUPINFOEXW startup{};
     startup.StartupInfo.cb = sizeof(startup);
     startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
@@ -133,13 +149,14 @@ bool Synthesize(const std::wstring& folder, const std::string& text, HANDLE stop
 Result Speak(const std::wstring& folder, const std::string& text, int volume, HANDLE stop) {
     volume = std::clamp(volume, 0, 100);
     if (volume == 0) return Result::Played;
-    if (GetFileAttributesW((folder + L"piper.exe").c_str()) == INVALID_FILE_ATTRIBUTES ||
-        GetFileAttributesW((folder + kModel).c_str()) == INVALID_FILE_ATTRIBUTES)
+    const auto model = Model(folder);
+    if (!model || GetFileAttributesW((folder + L"piper.exe").c_str()) == INVALID_FILE_ATTRIBUTES)
         return Result::Unavailable;
-    if (g_lastText != text || g_lastPcm.empty()) {
+    if (g_lastText != text || g_lastModel != model || g_lastPcm.empty()) {
         std::vector<char> pcm;
         if (!Synthesize(folder, text, stop, pcm)) return Result::Failed;
         g_lastText = text;
+        g_lastModel = model;
         g_lastPcm = std::move(pcm);
     }
     if (volume == 100) return Play(g_lastPcm, stop) ? Result::Played : Result::Failed;
@@ -150,6 +167,7 @@ Result Speak(const std::wstring& folder, const std::string& text, int volume, HA
 
 void ClearCache() {
     g_lastText.clear();
+    g_lastModel.clear();
     std::vector<char>().swap(g_lastPcm);
 }
 }

@@ -10,15 +10,19 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
+#include <mutex>
+#include <cwctype>
 
 namespace {
 constexpr int kRate = 16000;
 constexpr int kSamples = kRate / 10;
-constexpr int kPreRoll = 12;
-constexpr ULONGLONG kCommandTime = 5000;
+constexpr int kPreRoll = 18;
 constexpr std::string_view kWakeWords[]{u8"контур"};
-struct Command { std::string_view phrase; voice::Event event; };
-constexpr Command kCommands[]{
+struct Command { std::string phrase; voice::Event event; };
+const std::vector<Command>& Commands() {
+    static const auto commands = [] {
+    std::vector<Command> rows{
     {u8"переключи звук на колонки", voice::Speakers},
     {u8"переключи на колонки", voice::Speakers},
     {u8"переключи звук на наушники", voice::Headphones},
@@ -27,16 +31,133 @@ constexpr Command kCommands[]{
     {u8"включи яндекс музыку и волну", voice::PlayWave},
     {u8"включи яндекс музыку и мою волну", voice::PlayWave},
     {u8"выключи музыку", voice::PauseMusic},
-};
+    {u8"следующий трек", voice::NextTrack},
+    {u8"поставь лайк", voice::LikeTrack},
+    {u8"убери лайк", voice::RemoveLike},
+    {u8"сними лайк", voice::RemoveLike},
+    {u8"удали лайк", voice::RemoveLike},
+    {u8"что сейчас играет", voice::CurrentTrack},
+    {u8"сделай дис корд потише", voice::DiscordQuieter},
+    {u8"сделай голосовой чат потише", voice::DiscordQuieter},
+    {u8"отмени таймер музыки", voice::CancelTimer},
+    {u8"предыдущий трек", voice::PreviousTrack},
+    {u8"верни предыдущий трек", voice::PreviousTrack},
+    {u8"предыдущая песня", voice::PreviousTrack},
+    {u8"трек назад", voice::PreviousTrack},
+    {u8"следующая песня", voice::NextTrack},
+    {u8"переключи трек", voice::NextTrack},
+    {u8"пропусти песню", voice::NextTrack},
+    {u8"пропусти трек", voice::NextTrack},
+    {u8"лайкни песню", voice::LikeTrack},
+    {u8"лайкни трек", voice::LikeTrack},
+    {u8"мне нравится эта песня", voice::LikeTrack},
+    {u8"что за песня играет", voice::CurrentTrack},
+    {u8"что играет", voice::CurrentTrack},
+    {u8"какая песня играет", voice::CurrentTrack},
+    {u8"какой сейчас трек", voice::CurrentTrack},
+    {u8"назови трек", voice::CurrentTrack},
+    {u8"скажи что сейчас играет", voice::CurrentTrack},
+    {u8"отмени таймер", voice::CancelTimer},
+    {u8"сними таймер", voice::CancelTimer},
+    {u8"сними таймер музыки", voice::CancelTimer},
+    {u8"отключи таймер", voice::CancelTimer},
+    {u8"убери таймер", voice::CancelTimer},
+    {u8"музыку погромче", voice::MusicLouder},
+    {u8"сделай музыку погромче", voice::MusicLouder},
+    {u8"прибавь музыку", voice::MusicLouder},
+    {u8"увеличь громкость музыки", voice::MusicLouder},
+    {u8"музыку потише", voice::MusicQuieter},
+    {u8"сделай музыку потише", voice::MusicQuieter},
+    {u8"убавь музыку", voice::MusicQuieter},
+    {u8"сделай дис корд погромче", voice::DiscordLouder},
+    {u8"сделай голосовой чат погромче", voice::DiscordLouder},
+    {u8"громкость музыки на максимум", static_cast<voice::Event>(voice::MusicVolume + 100)},
+    {u8"музыку на максимум", static_cast<voice::Event>(voice::MusicVolume + 100)},
+    {u8"поставь музыку на паузу", voice::PauseMusic},
+    {u8"останови музыку", voice::PauseMusic},
+    };
+    const char* small[]{u8"ноль", u8"один", u8"два", u8"три", u8"четыре", u8"пять", u8"шесть", u8"семь", u8"восемь", u8"девять",
+        u8"десять", u8"одиннадцать", u8"двенадцать", u8"тринадцать", u8"четырнадцать", u8"пятнадцать", u8"шестнадцать", u8"семнадцать", u8"восемнадцать", u8"девятнадцать"};
+    const char* tens[]{ "", "", u8"двадцать", u8"тридцать", u8"сорок", u8"пятьдесят", u8"шестьдесят", u8"семьдесят", u8"восемьдесят", u8"девяносто" };
+    const char* smallGen[]{u8"нуля", u8"одного", u8"двух", u8"трёх", u8"четырёх", u8"пяти", u8"шести", u8"семи", u8"восьми", u8"девяти",
+        u8"десяти", u8"одиннадцати", u8"двенадцати", u8"тринадцати", u8"четырнадцати", u8"пятнадцати", u8"шестнадцати", u8"семнадцати", u8"восемнадцати", u8"девятнадцати"};
+    const char* tensGen[]{ "", "", u8"двадцати", u8"тридцати", u8"сорока", u8"пятидесяти", u8"шестидесяти", u8"семидесяти", u8"восьмидесяти", u8"девяноста" };
+    for (int i = 0; i <= 100; ++i) {
+        const int last = i % 10;
+        std::string number = i < 20 ? small[i] : i == 100 ? u8"сто" : tens[i / 10];
+        if (i >= 20 && last) number += std::string(" ") + small[last];
+        const bool teen = i % 100 >= 11 && i % 100 <= 14;
+        const char* percent = !teen && last == 1 ? u8" процент" : !teen && last >= 2 && last <= 4 ? u8" процента" : u8" процентов";
+        const auto music = static_cast<voice::Event>(voice::MusicVolume + i);
+        std::string genitive = i < 20 ? smallGen[i] : i == 100 ? u8"ста" : tensGen[i / 10];
+        if (i >= 20 && last) genitive += std::string(" ") + smallGen[last];
+        for (auto prefix : {u8"музыку на ", u8"громкость музыки ", u8"поставь музыку на "}) {
+            rows.push_back({prefix + number + percent, music});
+            rows.push_back({prefix + number, music});
+        }
+        for (auto prefix : {u8"убавь музыку до ", u8"прибавь музыку до ", u8"сделай музыку до "}) {
+            rows.push_back({prefix + number + percent, music});
+            rows.push_back({prefix + genitive + (last == 1 && !teen ? u8" процента" : u8" процентов"), music});
+        }
+        rows.push_back({u8"дис корд на " + number + percent, static_cast<voice::Event>(voice::DiscordVolume + i)});
+        if (!i) continue;
+        if (!teen && (last == 1 || last == 2)) {
+            const std::string feminine = last == 1 ? u8"одну" : u8"две";
+            number = i < 20 ? feminine : tens[i / 10] + std::string(" ") + feminine;
+        }
+        const char* minute = !teen && last == 1 ? u8" минуту" : !teen && last >= 2 && last <= 4 ? u8" минуты" : u8" минут";
+        rows.push_back({u8"выключи музыку через " + number + minute, static_cast<voice::Event>(voice::MusicTimer + i)});
+    }
+    return rows;
+    }();
+    return commands;
+}
+
+std::mutex g_profilesMutex;
+voice::Profiles g_profiles;
+constexpr wchar_t kProfileKey[] = L"Software\\WirelessBattery\\VoiceScenarios";
+
+std::string PhraseUtf8(const std::wstring& phrase) {
+    const int size = WideCharToMultiByte(CP_UTF8, 0, phrase.data(), int(phrase.size()), nullptr, 0, nullptr, nullptr);
+    std::string result(size, '\0');
+    if (size) WideCharToMultiByte(CP_UTF8, 0, phrase.data(), int(phrase.size()), result.data(), size, nullptr, nullptr);
+    return result;
+}
 
 std::string Grammar(bool wakeOnly) {
     std::string grammar = R"(["[unk]")";
     auto add = [&](std::string_view phrase) { grammar += ",\""; grammar += phrase; grammar += "\""; };
-    for (const auto& command : kCommands) {
+    for (const auto& command : Commands()) {
+        if (wakeOnly && command.event >= voice::MusicVolume) continue;
         add(command.phrase);
-        if (!wakeOnly)
-            for (auto word : kWakeWords) add(std::string(word) + " " + std::string(command.phrase));
+        if (!wakeOnly) {
+            add(std::string(kWakeWords[0]) + " " + command.phrase);
+            if (command.event < voice::MusicVolume) {
+                const std::string wake(kWakeWords[0]);
+                for (auto prefix : {u8"пожалуйста ", u8"можешь ", u8"давай ", u8"не "}) {
+                    add(prefix + command.phrase);
+                    add(wake + " " + prefix + command.phrase);
+                }
+                add(command.phrase + u8" пожалуйста");
+            }
+        }
     }
+    if (!wakeOnly) {
+        std::lock_guard<std::mutex> guard(g_profilesMutex);
+        for (const auto& profile : g_profiles) {
+            if (!profile.actions) continue;
+            const auto phrase = PhraseUtf8(profile.phrase);
+            add(phrase);
+            add(std::string(kWakeWords[0]) + " " + phrase);
+            add(u8"давай " + phrase);
+            add(std::string(kWakeWords[0]) + u8" давай " + phrase);
+            add(u8"запусти " + phrase);
+            add(std::string(kWakeWords[0]) + u8" запусти " + phrase);
+        }
+    }
+    if (!wakeOnly)
+        for (auto phrase : {u8"контур пожалуйста", u8"пожалуйста", u8"давай", u8"можешь", u8"не надо", u8"ничего не делай"})
+            add(phrase);
     if (wakeOnly) {
         for (auto word : kWakeWords) add(word);
         // Negative examples reduce the chance of forcing unrelated speech to a wake word.
@@ -81,8 +202,20 @@ std::string JsonText(const char* json, const char* key) {
 
 voice::Event ParseCommand(std::string_view text) {
     text.remove_prefix(WakePrefix(text));
-    for (const auto& command : kCommands)
+    for (auto prefix : {std::string_view(u8"пожалуйста "), std::string_view(u8"можешь "), std::string_view(u8"давай ")})
+        if (text.substr(0, prefix.size()) == prefix) text.remove_prefix(prefix.size());
+    constexpr std::string_view please = u8" пожалуйста";
+    if (text.size() > please.size() && text.substr(text.size() - please.size()) == please)
+        text.remove_suffix(please.size());
+    for (const auto& command : Commands())
         if (text == command.phrase) return command.event;
+    std::lock_guard<std::mutex> guard(g_profilesMutex);
+    for (unsigned i = 0; i < g_profiles.size(); ++i)
+        if (g_profiles[i].actions) {
+            const auto phrase = PhraseUtf8(g_profiles[i].phrase);
+            if (text == phrase || text == u8"запусти " + phrase)
+                return static_cast<voice::Event>(voice::Scenario + i);
+        }
     return voice::EngineError;
 }
 
@@ -203,7 +336,7 @@ struct Decoder {
 
     void Tick(ULONGLONG now) {
         if (command && now >= deadline) {
-            Submit(engine.finalResult(command.get()));
+            if (!Submit(engine.finalResult(command.get()))) report(voice::Unrecognized);
             Finish();
         }
     }
@@ -233,13 +366,14 @@ struct Decoder {
         const bool ended = engine.accept(wake.get(), data, bytes) > 0;
         const auto text = ended ? JsonText(engine.result(wake.get()), "\"text\"") :
                                   JsonText(engine.partial(wake.get()), "\"partial\"");
-        const bool wakeWord = std::find(std::begin(kWakeWords), std::end(kWakeWords), text) != std::end(kWakeWords);
+        const bool wakeWord = std::find(std::begin(kWakeWords), std::end(kWakeWords), text) != std::end(kWakeWords) ||
+                              WakePrefix(text) != 0;
         consecutive = wakeWord ? consecutive + 1 : 0;
         if (!wakeWord || (!ended && consecutive < 2)) return true;
         consecutive = 0;
         command.reset(engine.recognizerNew(model, kRate, Grammar(false).c_str()));
         if (!command) return false;
-        deadline = now + kCommandTime;
+        deadline = now + voice::CommandWindowMs;
         report(voice::Wake);
         bool complete = false;
         for (const auto& block : recent) {
@@ -375,6 +509,54 @@ DWORD WINAPI Speak(LPVOID payload) {
 } // namespace
 
 namespace voice {
+Profiles LoadProfiles() {
+    std::lock_guard<std::mutex> guard(g_profilesMutex);
+    for (unsigned i = 0; i < g_profiles.size(); ++i) {
+        wchar_t data[65]{};
+        DWORD bytes = sizeof(data);
+        const auto name = std::to_wstring(i);
+        if (RegGetValueW(HKEY_CURRENT_USER, kProfileKey, name.c_str(), RRF_RT_REG_SZ, nullptr, data, &bytes) != ERROR_SUCCESS ||
+            data[0] < L'1' || data[0] > L'?' || data[1] != L'|' || !data[2]) {
+            g_profiles[i] = {};
+            continue;
+        }
+        g_profiles[i] = {data + 2, unsigned(data[0] - L'0')};
+    }
+    return g_profiles;
+}
+
+bool SaveProfile(unsigned slot, const Profile& profile) {
+    if (slot >= ScenarioCount || profile.phrase.size() > 60 || profile.actions > 15 ||
+        (profile.actions & (Headset | Speaker)) == (Headset | Speaker)) return false;
+    Profile normalized{{}, profile.actions};
+    for (wchar_t c : profile.phrase) {
+        if (c >= L'А' && c <= L'Я') c += L'а' - L'А';
+        if (c == L'Ё') c = L'ё';
+        if (c == L' ') {
+            if (!normalized.phrase.empty() && normalized.phrase.back() != L' ') normalized.phrase += c;
+        } else if ((c >= L'а' && c <= L'я') || c == L'ё') normalized.phrase += c;
+        else return false;
+    }
+    if (!normalized.phrase.empty() && normalized.phrase.back() == L' ') normalized.phrase.pop_back();
+    if (normalized.actions && (normalized.phrase.empty() || normalized.phrase == L"контур" ||
+        normalized.phrase.rfind(L"контур ", 0) == 0)) return false;
+    if (!normalized.actions) normalized.phrase.clear();
+    if (!normalized.phrase.empty()) {
+        const auto phrase = PhraseUtf8(normalized.phrase);
+        for (const auto& command : Commands()) if (command.phrase == phrase) return false;
+    }
+    std::lock_guard<std::mutex> guard(g_profilesMutex);
+    for (unsigned i = 0; i < g_profiles.size(); ++i)
+        if (i != slot && normalized.actions && g_profiles[i].phrase == normalized.phrase) return false;
+    const auto key = std::to_wstring(slot);
+    std::wstring data = {wchar_t(L'0' + normalized.actions), L'|'};
+    data += normalized.phrase;
+    if (RegSetKeyValueW(HKEY_CURRENT_USER, kProfileKey, key.c_str(), REG_SZ, data.c_str(),
+                        DWORD((data.size() + 1) * sizeof(wchar_t))) != ERROR_SUCCESS) return false;
+    g_profiles[slot] = std::move(normalized);
+    return true;
+}
+
 bool Start(HWND owner, UINT message) {
     if (g_running) return true;
     Stop();

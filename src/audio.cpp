@@ -2,6 +2,7 @@
 
 #include <initguid.h>
 #include <mmdeviceapi.h>
+#include <audiopolicy.h>
 #include <functiondiscoverykeys_devpkey.h>
 
 #include <algorithm>
@@ -278,3 +279,60 @@ std::wstring SwitchTo(const std::wstring& id) {
 }
 
 }  // namespace audio
+
+bool audio::AppVolume(bool music, int percent, bool relative) {
+    IMMDeviceCollection* collection = nullptr;
+    if (!g_enumerator || FAILED(g_enumerator->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &collection))) return false;
+    ComPtr<IMMDeviceCollection> devices(collection);
+    UINT count = 0;
+    devices->GetCount(&count);
+    bool changed = false;
+    for (UINT i = 0; i < count; ++i) {
+        IMMDevice* endpoint = nullptr;
+        if (FAILED(devices->Item(i, &endpoint))) continue;
+        ComPtr<IMMDevice> device(endpoint);
+        IAudioSessionManager2* manager = nullptr;
+        if (FAILED(device->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr,
+                                   reinterpret_cast<void**>(&manager)))) continue;
+        ComPtr<IAudioSessionManager2> sessions(manager);
+        IAudioSessionEnumerator* raw = nullptr;
+        if (FAILED(sessions->GetSessionEnumerator(&raw))) continue;
+        ComPtr<IAudioSessionEnumerator> list(raw);
+        int size = 0;
+        list->GetCount(&size);
+        for (int j = 0; j < size; ++j) {
+            IAudioSessionControl* control = nullptr;
+            if (FAILED(list->GetSession(j, &control))) continue;
+            ComPtr<IAudioSessionControl> session(control);
+            IAudioSessionControl2* extended = nullptr;
+            if (FAILED(session->QueryInterface(IID_PPV_ARGS(&extended)))) continue;
+            ComPtr<IAudioSessionControl2> details(extended);
+            DWORD pid = 0;
+            if (FAILED(details->GetProcessId(&pid)) || !pid) continue;
+            HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+            if (!process) continue;
+            wchar_t path[32768];
+            DWORD length = ARRAYSIZE(path);
+            const BOOL ok = QueryFullProcessImageNameW(process, 0, path, &length);
+            CloseHandle(process);
+            if (!ok) continue;
+            const wchar_t* file = wcsrchr(path, L'\\');
+            if (!file) continue;
+            ++file;
+            const bool match = music ? !_wcsicmp(file, L"Яндекс Музыка.exe") || !_wcsicmp(file, L"YandexMusic.exe")
+                : !_wcsicmp(file, L"Discord.exe") || !_wcsicmp(file, L"DiscordCanary.exe") || !_wcsicmp(file, L"DiscordPTB.exe");
+            if (!match) continue;
+            ISimpleAudioVolume* rawVolume = nullptr;
+            if (FAILED(session->QueryInterface(IID_PPV_ARGS(&rawVolume)))) continue;
+            ComPtr<ISimpleAudioVolume> volume(rawVolume);
+            float level = percent / 100.f;
+            if (relative) {
+                if (FAILED(volume->GetMasterVolume(&level))) continue;
+                level = std::clamp(level + percent / 100.f, 0.f, 1.f);
+            }
+            if (!relative && percent > 0) volume->SetMute(FALSE, nullptr);
+            if (SUCCEEDED(volume->SetMasterVolume(level, nullptr))) changed = true;
+        }
+    }
+    return changed;
+}
